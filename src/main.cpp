@@ -9,6 +9,7 @@
 #include <Fonts/FreeSans12pt7b.h>        // Regular font for labels
 #include <Fonts/FreeSans9pt7b.h>         // Small font for status
 #include <driver/twai.h>  // ESP32 TWAI (CAN) driver
+#include "temp_logger.h"  // Temperature logging functionality
 
 // Define pins for the ILI9341 display
 #define TFT_CS   5   // Chip Select
@@ -366,24 +367,43 @@ void analyzeCanMessage(uint32_t id, uint8_t* data, uint8_t length) {
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  Serial.println("\nFord F-150 Temperature Display - Starting Up");
+  Serial.println("Enhanced Temperature Detection Mode Enabled");
   
-  Serial.println("=== F150 CAN Bus Temperature Monitor ===");
-  Serial.println("Serial output shows all CAN messages for reverse engineering");
-  Serial.println("Look for patterns when you change HVAC settings!");
-  Serial.println("================================================");
-  
+  // Set up LED pin
   pinMode(STATUS_LED_PIN, OUTPUT);
+  digitalWrite(STATUS_LED_PIN, HIGH);  // Turn on during setup
   
+  // Initialize the TFT display
   Serial.println("Initializing display...");
   tft.begin();
-  tft.setRotation(1);
+  tft.setRotation(1);  // Landscape orientation
   tft.fillScreen(COLOR_BACKGROUND);
+  tft.setTextColor(COLOR_TEXT);
   
+  // Draw initial status info
+  tft.setTextSize(1);
+  tft.setCursor(10, 10);
+  tft.println("Initializing...");
+  
+  // Initialize CAN bus communication
   initCAN();
+  
+  // Draw initial screen
+  tft.fillScreen(COLOR_BACKGROUND);
   drawStatusBar();
   
-  Serial.println("Setup complete - monitoring CAN bus...");
+  // Show logger instructions
+  Serial.println("\n-------------------------------------------------------------");
+  Serial.println("TEMPERATURE DETECTION LOGGER INSTRUCTIONS:");
+  Serial.println("1. Start your vehicle's engine");
+  Serial.println("2. Change climate control from FULL COLD to FULL HOT slowly");
+  Serial.println("3. Watch for CAN messages that consistently change with adjustment");
+  Serial.println("4. Messages with ★ symbols show detected changes");
+  Serial.println("5. Every 10 seconds, a summary of potential temperature messages");
+  Serial.println("   will be displayed, showing which bytes change most frequently");
+  Serial.println("-------------------------------------------------------------\n");
+  Serial.println("Setup complete, starting main loop");
 }
 
 void initCAN() {
@@ -553,6 +573,7 @@ void updateDisplay() {
 void processCanMessages() {
   static uint32_t totalMessages = 0;
   static uint32_t lastCountTime = 0;
+  static uint32_t lastCandidateDisplayTime = 0;
   static bool firstMessageReceived = false;
   
   // Using real CAN hardware with TWAI driver
@@ -562,11 +583,17 @@ void processCanMessages() {
     totalMessages++;
     firstMessageReceived = true;
     
-    // Process received message
-    printCanMessage(message.identifier, message.data, message.data_length_code);
+    // Enhanced logging for temperature detection
+    logDetailedCanMessage(message);
+    trackTemperatureCandidate(message);
+    
+    // Process received message (standard processing)
+    // printCanMessage(message.identifier, message.data, message.data_length_code);
     
     // Analyze for temperature data
     analyzeCanMessage(message.identifier, message.data, message.data_length_code);
+    
+    // THESE ARE SUSPECTED IDs/BYTES - We're using the logger to verify them
     
     // Process climate control message (0x3D3) - Driver and Passenger temps
     if (message.identifier == F150_CLIMATE_CONTROL_ID) {
@@ -577,7 +604,7 @@ void processCanMessages() {
         hvacTemp2 = (message.data[1] - 40.0); // Passenger temp
         
         // Log the found values
-        Serial.printf("[FOUND] Climate Control - Driver: %.1f°C, Passenger: %.1f°C\n", 
+        Serial.printf("[SUSPECTED] Climate Control - Driver: %.1f°C, Passenger: %.1f°C\n", 
                       hvacTemp1, hvacTemp2);
       }
     }
@@ -590,13 +617,13 @@ void processCanMessages() {
         uint8_t byte1 = message.data[1]; // Using byte 1 for outside temp
         uint8_t byte2 = message.data[2]; // Previous byte used
         
-        // FOUND CORRECT ENCODING: Ford F150 uses half-degree precision on byte 1
+        // SUSPECTED ENCODING: Ford F150 may use half-degree precision on byte 1
         // Formula: (value * 0.5) - 40
         outsideTemp = (message.data[1] * 0.5) - 40.0;
         
         // Log the raw values and result
-        Serial.printf("[OAT] Raw values: %02X %02X %02X \n", byte0, byte1, byte2);
-        Serial.printf("[OAT] Outside Temp: %.1f°C (%.1f°F)\n", 
+        Serial.printf("[SUSPECTED_OAT] Raw values: %02X %02X %02X \n", byte0, byte1, byte2);
+        Serial.printf("[SUSPECTED_OAT] Outside Temp: %.1f°C (%.1f°F)\n", 
                      outsideTemp, celsiusToFahrenheit(outsideTemp));
       }
     }
@@ -620,6 +647,12 @@ void processCanMessages() {
                   status.msgs_to_rx, status.msgs_to_tx,
                   status.rx_error_counter, status.tx_error_counter);
     }
+  }
+  
+  // Display temperature candidates every 10 seconds
+  if (millis() - lastCandidateDisplayTime > 10000) {
+    lastCandidateDisplayTime = millis();
+    displayTemperatureCandidates();
   }
   
   // Simulation disabled - we're now using real CAN messages
