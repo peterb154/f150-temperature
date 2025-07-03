@@ -152,6 +152,7 @@ This project has successfully reverse-engineered several F150 systems. Each syst
 ## 🔧 Development Workflow
 
 ### 1. Data Capture Phase
+
 ```bash
 # Start ESP32 logger
 pio run -t upload
@@ -275,11 +276,10 @@ This project's key insight is Ford's use of ASCII decimal encoding for human-rea
 - [ISO 11898 CAN Standard](https://www.iso.org/standard/63648.html)
 - [ESP32 TWAI Documentation](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/twai.html)
 
-
 ## 🤝 License
 
 MIT License
 
 ---
 
-**Happy CAN bus hacking! 🚗💻**
+Happy CAN bus hacking! 🚗💻

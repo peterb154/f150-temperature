@@ -8,4 +8,44 @@ wheels/
 
 # Virtual environments
 .venv
-pio
+
+# PlatformIO
+.pio/
+.vscode/
+lib_deps/
+.cache/
+
+# Build artifacts
+build/
+*.bin
+*.hex
+*.elf
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
