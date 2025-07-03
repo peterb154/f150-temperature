@@ -1,691 +1,285 @@
 #include <Arduino.h>
+#include <driver/twai.h>
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <Fonts/FreeSansBold24pt7b.h>    // Large font for main temperatures
-#include <Fonts/FreeSansBold18pt7b.h>    // Medium font for smaller temperatures  
-#include <Fonts/FreeSans12pt7b.h>        // Regular font for labels
-#include <Fonts/FreeSans9pt7b.h>         // Small font for status
-#include <driver/twai.h>  // ESP32 TWAI (CAN) driver
-#include "temp_logger.h"  // Temperature logging functionality
+#include <Fonts/FreeSansBold18pt7b.h>
+#include <Fonts/FreeSans12pt7b.h>
+#include <Fonts/FreeSans9pt7b.h>
 
-// Define pins for the ILI9341 display
-#define TFT_CS   5   // Chip Select
-#define TFT_RST  4   // Reset
-#define TFT_DC   2   // Data/Command
-#define TFT_MOSI 9  // SPI Data Out (SDA/MOSI/SDI)
-#define TFT_CLK  8  // SPI Clock (SCK)
-#define TFT_MISO 7  // SPI Data In (SDO/MISO)
+// Define pins for the ILI9341 display (corrected)
+#define TFT_CS   5
+#define TFT_RST  4
+#define TFT_DC   2
+#define TFT_MOSI 9
+#define TFT_CLK  8
+#define TFT_MISO 7
 
-#define STATUS_LED_PIN 2
+// CAN Bus pins
 #define CAN_TX_PIN 17
 #define CAN_RX_PIN 16
 
-// F150 specific CAN IDs (discovered from analysis)
-#define F150_CLIMATE_CONTROL_ID 0x3D3   // Contains driver and passenger temp settings
-#define F150_AMBIENT_DATA_ID 0x3B3      // Contains outside temp data (byte 2)
-#define F150_ENGINE_DATA_ID 0x420       // Engine data
-#define F150_OBD_RESPONSE_ID 0x7E8      // OBD-II responses
+// Status LED
+#define STATUS_LED_PIN 15
+
+// Colors
+#define COLOR_BACKGROUND 0x0841
+#define COLOR_CARD_BG    0x2124
+#define COLOR_PRIMARY    0x07FF
+#define COLOR_TEXT       0xFFFF
+#define COLOR_SUCCESS    0x07E0
+#define COLOR_WARNING    0xFFE0
 
 // Create TFT instance
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_MOSI, TFT_CLK, TFT_RST, TFT_MISO);
 
-// Enhanced color palette
-#define COLOR_BACKGROUND 0x0841   // Dark blue-grey
-#define COLOR_CARD_BG    0x2124   // Lighter grey for cards
-#define COLOR_PRIMARY    0x07FF   // Cyan
-#define COLOR_TEXT       0xFFFF   // White
-#define COLOR_COLD       0x249F   // Light blue
-#define COLOR_WARM       0xFD20   // Orange
-#define COLOR_HOT        0xF800   // Red
-#define COLOR_ACCENT     0x07E0   // Green
-#define COLOR_WARNING    0xFFE0   // Yellow
+// Global variables
+unsigned long sessionStartTime;
+unsigned long messageCount = 0;
+unsigned long markerCount = 0;
 
-// Temperature variables
-float outsideTemp = 0.0;
-float hvacTemp1 = 0.0;
-float hvacTemp2 = 0.0;
-int canMessagesReceived = 0;
-uint32_t lastCanMsgId = 0;
-bool ledState = false;
-
-// Display update tracking
-unsigned long lastUpdateTime = 0;
-float lastDisplayedOutside = -999;
-float lastDisplayedHvac1 = -999;
-float lastDisplayedHvac2 = -999;
-
-// Function prototypes
+// Function declarations
 void initCAN();
-// void simulateTemperatures();
+void initDisplay();
+void processSerialCommand();
 void updateDisplay();
-void drawStatusBar();
-void drawTempCard(int16_t x, int16_t y, int16_t w, int16_t h, const char* label, float temp, bool isOutside = false);
-void drawRoundRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color, bool filled = false);
-uint16_t getTempColor(float temp);
-float celsiusToFahrenheit(float celsius);
-void printCanMessage(uint32_t id, uint8_t* data, uint8_t length);
-void analyzeCanMessage(uint32_t id, uint8_t* data, uint8_t length);
-void processTemperatureCanMessages();
-bool isPotentialTemperatureMessage(uint32_t id, uint8_t* data, uint8_t length);
-void trackMessageChanges(uint32_t id, uint8_t* data, uint8_t length);
-
-// Structure to track CAN message changes
-#define MAX_CAN_HISTORY 10
-#define MAX_TRACKED_IDS 30
-
-struct CanMessageHistory {
-  uint32_t id;
-  uint8_t data[8][MAX_CAN_HISTORY]; // Last MAX_CAN_HISTORY values for each byte
-  uint8_t length;
-  unsigned long timestamp[MAX_CAN_HISTORY];
-  uint8_t changeCount[8]; // How many times each byte has changed
-  uint8_t currentIndex;
-  bool isPotentialTemp;
-  float potentialTempValue;
-};
-
-// Array to store tracked CAN messages
-CanMessageHistory trackedMessages[MAX_TRACKED_IDS];
-int trackedMessageCount = 0;
-
-// Function to convert Celsius to Fahrenheit
-float celsiusToFahrenheit(float celsius) {
-  return (celsius * 9.0 / 5.0) + 32.0;
-}
-
-// Function to get temperature color based on Fahrenheit value
-uint16_t getTempColor(float tempF) {
-  if (tempF < 50) return COLOR_COLD;      // Below 50°F - cold blue
-  if (tempF < 77) return COLOR_TEXT;      // 50-77°F - normal white  
-  if (tempF < 95) return COLOR_WARM;      // 77-95°F - warm orange
-  return COLOR_HOT;                       // Above 95°F - hot red
-}
-
-// Function to draw a rounded rectangle (simple version)
-void drawRoundRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color, bool filled) {
-  if (filled) {
-    tft.fillRect(x+2, y, w-4, h, color);
-    tft.fillRect(x, y+2, w, h-4, color);
-    tft.fillRect(x+1, y+1, w-2, h-2, color);
-  } else {
-    tft.drawRect(x+2, y, w-4, h, color);
-    tft.drawRect(x, y+2, w, h-4, color);
-    tft.drawPixel(x+1, y+1, color);
-    tft.drawPixel(x+w-2, y+1, color);
-    tft.drawPixel(x+1, y+h-2, color);
-    tft.drawPixel(x+w-2, y+h-2, color);
-  }
-}
-
-// Function to draw a temperature card
-void drawTempCard(int16_t x, int16_t y, int16_t w, int16_t h, const char* label, float temp, bool isOutside) {
-  // Card background
-  drawRoundRect(x, y, w, h, COLOR_CARD_BG, true);
-  drawRoundRect(x, y, w, h, COLOR_PRIMARY, false);
-  
-  // Label with FreeFonts
-  tft.setTextColor(COLOR_PRIMARY);
-  tft.setFont(&FreeSans9pt7b);
-  
-  // Get text bounds for centering
-  int16_t x1, y1;
-  uint16_t labelW, labelH;
-  tft.getTextBounds(label, 0, 0, &x1, &y1, &labelW, &labelH);
-  tft.setCursor(x + (w - labelW) / 2, y + 20);
-  tft.print(label);
-  
-  // Convert to Fahrenheit and get color
-  float tempF = celsiusToFahrenheit(temp);
-  uint16_t tempColor = getTempColor(tempF);
-  tft.setTextColor(tempColor);
-  
-  // Set font size based on card size
-  if (isOutside) {
-    tft.setFont(&FreeSansBold24pt7b);
-  } else {
-    tft.setFont(&FreeSansBold18pt7b);
-  }
-  
-  // Format temperature string
-  char tempStr[12];
-  sprintf(tempStr, "%.0f F", tempF);
-  
-  // Get text bounds for centering the temperature
-  uint16_t tempW, tempH;
-  tft.getTextBounds(tempStr, 0, 0, &x1, &y1, &tempW, &tempH);
-  int tempX = x + (w - tempW) / 2;
-  int tempY = y + (isOutside ? 65 : 55);
-  tft.setCursor(tempX, tempY);
-  tft.print(tempStr);
-  
-  // Reset to default font
-  tft.setFont();
-  
-  // Temperature indicator icon
-  int iconY = y + h - 25;
-  if (tempF < 60) {
-    // Cold indicator - snowflake-like pattern
-    tft.fillCircle(x + w/2, iconY, 3, COLOR_COLD);
-    tft.drawLine(x + w/2 - 4, iconY, x + w/2 + 4, iconY, COLOR_COLD);
-    tft.drawLine(x + w/2, iconY - 4, x + w/2, iconY + 4, COLOR_COLD);
-  } else if (tempF > 86) {
-    // Hot indicator - sun-like pattern
-    tft.fillCircle(x + w/2, iconY, 4, COLOR_WARM);
-    for (int i = 0; i < 8; i++) {
-      float angle = i * PI / 4;
-      int x1 = x + w/2 + cos(angle) * 7;
-      int y1 = iconY + sin(angle) * 7;
-      int x2 = x + w/2 + cos(angle) * 10;
-      int y2 = iconY + sin(angle) * 10;
-      tft.drawLine(x1, y1, x2, y2, COLOR_WARM);
-    }
-  }
-}
-
-// Function to draw status bar
-void drawStatusBar() {
-  // Clear status area
-  tft.fillRect(0, 0, 320, 30, COLOR_BACKGROUND);
-  
-  // Title with FreeFonts
-  tft.setTextColor(COLOR_TEXT);
-  tft.setFont(&FreeSans12pt7b);
-  tft.setCursor(10, 20);
-  tft.print("CLIMATE");
-  
-  // Reset to small font for status
-  tft.setFont(&FreeSans9pt7b);
-  
-  // Connection status indicator
-  tft.fillCircle(300, 15, 8, canMessagesReceived > 0 ? COLOR_ACCENT : COLOR_WARNING);
-  tft.setTextColor(COLOR_TEXT);
-  tft.setCursor(260, 19);
-  tft.print("CAN");
-  
-  // Message counter
-  if (canMessagesReceived > 0) {
-    tft.setCursor(220, 19);
-    tft.print(canMessagesReceived);
-  }
-  
-  // CAN bus hacking hint
-//   tft.setTextColor(COLOR_PRIMARY);
-//   tft.setCursor(10, 225);
-//   tft.print("Serial: CAN messages for bus hacking");
-  
-  // Reset to default font
-  tft.setFont();
-}
-
-// Function to print CAN message to serial for debugging
-void printCanMessage(uint32_t id, uint8_t* data, uint8_t length) {
-  Serial.printf("CAN ID: 0x%03X | Data: ", id);
-  for (int i = 0; i < length; i++) {
-    Serial.printf("%02X ", data[i]);
-  }
-  Serial.printf("| Len: %d", length);
-  
-  // Add temperature analysis hints
-  if (isPotentialTemperatureMessage(id, data, length)) {
-    Serial.print(" [TEMP?]");
-  }
-  Serial.println();
-  
-  // Track and analyze the message
-  analyzeCanMessage(id, data, length);
-}
-
-// Function to check if a message might contain temperature data
-bool isPotentialTemperatureMessage(uint32_t id, uint8_t* data, uint8_t length) {
-  // Common patterns for temperature data in vehicles:
-  // 1. Values in typical temperature ranges (adjusted for encoding methods)
-  // 2. Known HVAC/BCM message IDs for Ford vehicles
-  
-  // Check for typical Ford F-150 HVAC or BCM message IDs
-  if (id == 0x3B3 || id == 0x3D3 || id == 0x410 || id == 0x420 || id == 0x430 ||
-      id == 0x7E8 || // OBD-II responses
-      (id >= 0x300 && id <= 0x500)) { // Common HVAC range
-    
-    // Check for temperature-like values in the data
-    for (int i = 0; i < length; i++) {
-      // Simple check for values in typical ambient temperature range
-      // Assumes standard encoding methods
-      // Raw byte value 0x00-0xFF could be:
-      // - Direct Celsius (-40 to 215°C with 0=0°C)
-      // - Direct Celsius (-128 to 127°C with 0x80=0°C)
-      // - Direct Fahrenheit (-40 to 215°F)
-      // - Scaled value (e.g., 0x00-0xFF = -40°C to 85°C)
-      
-      uint8_t value = data[i];
-      
-      // Typical ambient temperature range checks (using various encoding assumptions)
-      // Raw value between 0x00-0x7F (-40°C to 87°C) in standard 1:1 encoding
-      // Raw value between 0x50-0xA0 (-40°F to 100°F) in standard 1:1 encoding
-      // Raw value between 0x30-0x50 (48-80) could be room temp in raw hex value
-      if ((value >= 0x20 && value <= 0x80) || // Possible Celsius range
-          (value >= 0x50 && value <= 0xA0) || // Possible Fahrenheit range
-          (value >= 0x30 && value <= 0x60)) { // Possible direct temperature value
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-// Function to analyze and track changes in CAN messages
-void analyzeCanMessage(uint32_t id, uint8_t* data, uint8_t length) {
-  // Find or create message tracking entry
-  int idx = -1;
-  for (int i = 0; i < trackedMessageCount; i++) {
-    if (trackedMessages[i].id == id) {
-      idx = i;
-      break;
-    }
-  }
-  
-  // Create new entry if not found
-  if (idx == -1) {
-    if (trackedMessageCount < MAX_TRACKED_IDS) {
-      idx = trackedMessageCount++;
-      trackedMessages[idx].id = id;
-      trackedMessages[idx].length = length;
-      trackedMessages[idx].currentIndex = 0;
-      trackedMessages[idx].isPotentialTemp = false;
-      trackedMessages[idx].potentialTempValue = -999;
-      
-      // Initialize counters
-      for (int i = 0; i < 8; i++) {
-        trackedMessages[idx].changeCount[i] = 0;
-      }
-    } else {
-      // Too many IDs to track, skip
-      return;
-    }
-  }
-  
-  // Update message history
-  CanMessageHistory* msg = &trackedMessages[idx];
-  int currentIdx = msg->currentIndex;
-  msg->timestamp[currentIdx] = millis();
-  
-  // Check which bytes changed compared to previous message
-  int prevIdx = (currentIdx + MAX_CAN_HISTORY - 1) % MAX_CAN_HISTORY;
-  bool anyChanges = false;
-  
-  for (int i = 0; i < length; i++) {
-    // Store the new data
-    msg->data[i][currentIdx] = data[i];
-    
-    // If not first message, check for changes
-    if (msg->timestamp[prevIdx] > 0) {
-      if (msg->data[i][currentIdx] != msg->data[i][prevIdx]) {
-        msg->changeCount[i]++;
-        anyChanges = true;
-      }
-    }
-  }
-  
-  // Move to next history slot
-  msg->currentIndex = (currentIdx + 1) % MAX_CAN_HISTORY;
-  
-  // Check for temperature-like patterns
-  msg->isPotentialTemp = isPotentialTemperatureMessage(id, data, length);
-  
-  // For potential temperature messages with changes, print extra details
-  if (msg->isPotentialTemp && anyChanges) {
-    Serial.printf("  [Analysis] ID: 0x%03X - Potential temperature message\n", id);
-    Serial.print("  [Byte changes] ");
-    
-    for (int i = 0; i < length; i++) {
-      Serial.printf("%d:%d ", i, msg->changeCount[i]);
-    }
-    
-    // Convert using different temperature encoding assumptions
-    for (int i = 0; i < length; i++) {
-      uint8_t value = data[i];
-      
-      // Try different temperature encodings
-      float tempC1 = value - 40; // Common automotive: 0=−40°C, 255=215°C
-      float tempC2 = value - 128; // Signed byte: 0x80=0°C
-      float tempC3 = value; // Direct Celsius
-      float tempC4 = (value * 0.5) - 40; // Half-degree precision
-      
-      if ((tempC1 >= -20 && tempC1 <= 50) || 
-          (tempC2 >= -20 && tempC2 <= 50) ||
-          (tempC3 >= 0 && tempC3 <= 40) ||
-          (tempC4 >= -20 && tempC4 <= 50)) {
-        Serial.printf("\n  [Byte %d potential temp] Raw: %d | ", i, value);
-        Serial.printf("A: %.1f°C B: %.1f°C C: %.1f°C D: %.1f°C", tempC1, tempC2, tempC3, tempC4);
-      }
-    }
-    Serial.println();
-  }
-}
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("\nFord F-150 Temperature Display - Starting Up");
-  Serial.println("Enhanced Temperature Detection Mode Enabled");
+  delay(1000);
   
-  // Set up LED pin
+  Serial.println("F150_CAN_LOGGER_START");
+  Serial.println("# Simple marker-based capture");
+  Serial.println("# Type 'x' to insert markers (start/stop HVAC adjustment)");
+  Serial.println("TIMESTAMP_MS,ELAPSED_MS,CAN_ID,LENGTH,BYTE0,BYTE1,BYTE2,BYTE3,BYTE4,BYTE5,BYTE6,BYTE7,EXTENDED");
+  
+  // Initialize pins
   pinMode(STATUS_LED_PIN, OUTPUT);
-  digitalWrite(STATUS_LED_PIN, HIGH);  // Turn on during setup
+  digitalWrite(STATUS_LED_PIN, HIGH);
   
-  // Initialize the TFT display
-  Serial.println("Initializing display...");
-  tft.begin();
-  tft.setRotation(1);  // Landscape orientation
-  tft.fillScreen(COLOR_BACKGROUND);
-  tft.setTextColor(COLOR_TEXT);
+  // Initialize display
+  initDisplay();
   
-  // Draw initial status info
-  tft.setTextSize(1);
-  tft.setCursor(10, 10);
-  tft.println("Initializing...");
-  
-  // Initialize CAN bus communication
+  // Initialize CAN bus
   initCAN();
   
-  // Draw initial screen
-  tft.fillScreen(COLOR_BACKGROUND);
-  drawStatusBar();
+  Serial.println("# Setup complete. Capture starting immediately!");
+  Serial.println("# Send 'x' to mark start/stop of HVAC changes");
   
-  // Show logger instructions
-  Serial.println("\n-------------------------------------------------------------");
-  Serial.println("TEMPERATURE DETECTION LOGGER INSTRUCTIONS:");
-  Serial.println("1. Start your vehicle's engine");
-  Serial.println("2. Change climate control from FULL COLD to FULL HOT slowly");
-  Serial.println("3. Watch for CAN messages that consistently change with adjustment");
-  Serial.println("4. Messages with ★ symbols show detected changes");
-  Serial.println("5. Every 10 seconds, a summary of potential temperature messages");
-  Serial.println("   will be displayed, showing which bytes change most frequently");
-  Serial.println("-------------------------------------------------------------\n");
-  Serial.println("Setup complete, starting main loop");
+  sessionStartTime = millis();
+  digitalWrite(STATUS_LED_PIN, LOW);
+  updateDisplay();
+}
+
+void initDisplay() {
+  tft.begin();
+  tft.setRotation(1);  // Landscape
+  tft.fillScreen(COLOR_BACKGROUND);
+  
+  // Show initialization message
+  tft.setTextColor(COLOR_TEXT);
+  tft.setFont(&FreeSans12pt7b);
+  tft.setCursor(50, 100);
+  tft.println("F150 CAN Logger");
+  tft.setFont(&FreeSans9pt7b);
+  tft.setCursor(70, 130);
+  tft.println("Initializing...");
 }
 
 void initCAN() {
-  Serial.println("============================================");
-  Serial.println("FORD F150 CAN TEMPERATURE DISPLAY");
-  Serial.println("============================================");
-  Serial.println("DISCOVERED CAN IDs:");
-  Serial.println("0x3D3 - Climate Control - Contains driver (byte 0) and passenger (byte 1) temps");
-  Serial.println("0x3B3 - Ambient Data - Contains outside temp (byte 2)");
-  Serial.println("============================================");
-  Serial.println("TRYING 125KBPS BAUD RATE (Changed from 250kbps)");
-  Serial.println("TROUBLESHOOTING TIPS:");
-  Serial.println("1. Ensure vehicle ignition is fully ON (not just accessory)");
-  Serial.println("2. Check OBD-II connector is fully seated");
-  Serial.println("3. CAN_H and CAN_L connections may need to be swapped");
-  Serial.println("============================================");
-  Serial.println();
-  
   pinMode(CAN_RX_PIN, INPUT);
   pinMode(CAN_TX_PIN, OUTPUT);
   
-  // Initialize TWAI (CAN) driver
-  twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX_PIN, (gpio_num_t)CAN_RX_PIN, TWAI_MODE_NORMAL);
-  twai_timing_config_t t_config = TWAI_TIMING_CONFIG_125KBITS(); // Trying 125kbps for older Ford
+  // Update display
+  tft.fillRect(0, 110, 320, 30, COLOR_BACKGROUND);
+  tft.setTextColor(COLOR_TEXT);
+  tft.setFont(&FreeSans9pt7b);
+  tft.setCursor(50, 130);
+  tft.println("Connecting CAN 125KBPS...");
+  
+  Serial.println("# Initializing CAN at 125KBPS for 2011 F150...");
+  
+  // Configure TWAI for 125KBPS
+  twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(
+    (gpio_num_t)CAN_TX_PIN, 
+    (gpio_num_t)CAN_RX_PIN, 
+    TWAI_MODE_LISTEN_ONLY
+  );
+  
+  twai_timing_config_t t_config = TWAI_TIMING_CONFIG_125KBITS();
   twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
   
-  // Install TWAI driver
+  // Install and start
   if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
-    Serial.println("CAN driver installed successfully");
-  } else {
-    Serial.println("Failed to install CAN driver - check connections");
-    return;
-  }
-  
-  // Start TWAI driver
-  if (twai_start() == ESP_OK) {
-    Serial.println("CAN driver started successfully - waiting for messages");
-  } else {
-    Serial.println("Failed to start CAN driver - check power to transceiver");
-    return;
-  }
-  
-  Serial.println("CAN initialization complete - showing F150 temperatures");
-}
-
-// Simulate temperatures and CAN messages for testing
-void simulateTemperatures() {
-  static float baseOutsideTemp = 21.5;
-  static float baseHvac1 = 18.0;
-  static float baseHvac2 = 22.0;
-  static unsigned long counter = 0;
-  counter++;
-  
-  float timeFactor = (counter % 100) / 100.0;
-  outsideTemp = baseOutsideTemp + (timeFactor - 0.5) * 3;
-  hvacTemp1 = baseHvac1 + ((counter % 50) / 100.0 - 0.25) * 2;
-  hvacTemp2 = baseHvac2 + ((counter % 70) / 100.0 - 0.35) * 2;
-  
-  // Simulate CAN messages occasionally
-  if (counter % 100 == 0) {
-    canMessagesReceived++;
-    
-    // Simulate different CAN messages for demonstration
-    uint8_t testData[8];
-    switch((counter / 100) % 4) {
-      case 0:
-        lastCanMsgId = 0x3B3; // BCM message
-        testData[0] = 0x42; testData[1] = 0x11; 
-        testData[2] = random(0x20, 0x80); // Could be outside temp
-        testData[3] = random(0x10, 0x90); 
-        testData[4] = 0xFF; testData[5] = 0x00;
-        printCanMessage(lastCanMsgId, testData, 6);
-        break;
+    if (twai_start() == ESP_OK) {
+      // Test for messages for 2 seconds
+      unsigned long testStart = millis();
+      int testMessages = 0;
+      
+      while (millis() - testStart < 2000) {
+        twai_message_t message;
+        if (twai_receive(&message, pdMS_TO_TICKS(10)) == ESP_OK) {
+          testMessages++;
+        }
+      }
+      
+      if (testMessages > 0) {
+        Serial.println("# CAN connected - " + String(testMessages) + " messages received");
         
-      case 1:
-        lastCanMsgId = 0x3D3; // HVAC module
-        testData[0] = random(0x40, 0x80); // Could be HVAC temp 1
-        testData[1] = random(0x30, 0x70); // Could be HVAC temp 2
-        testData[2] = 0x12; testData[3] = 0x34;
-        printCanMessage(lastCanMsgId, testData, 4);
-        break;
-        
-      case 2:
-        lastCanMsgId = 0x420; // Engine data
-        testData[0] = 0x7E; testData[1] = random(0x80, 0xC0);
-        printCanMessage(lastCanMsgId, testData, 2);
-        break;
-        
-      case 3:
-        lastCanMsgId = 0x7E8; // OBD response
-        testData[0] = 0x03; testData[1] = 0x41; testData[2] = 0x05;
-        testData[3] = random(0x50, 0x90); // Coolant temp
-        printCanMessage(lastCanMsgId, testData, 4);
-        break;
+        // Update display with success
+        tft.fillRect(0, 140, 320, 40, COLOR_BACKGROUND);
+        tft.setTextColor(COLOR_SUCCESS);
+        tft.setCursor(50, 155);
+        tft.println("CAN Connected!");
+        tft.setCursor(50, 175);
+        tft.println("125KBPS - " + String(testMessages) + " msgs");
+        delay(1000);
+        return;
+      } else {
+        Serial.println("# CAN driver started but no messages - check vehicle");
+      }
     }
   }
+  
+  Serial.println("# CAN warning - may work once vehicle is running");
+  
+  tft.fillRect(0, 140, 320, 40, COLOR_BACKGROUND);
+  tft.setTextColor(COLOR_WARNING);
+  tft.setCursor(50, 155);
+  tft.println("CAN Ready");
+  tft.setCursor(50, 175);
+  tft.println("Start vehicle engine");
 }
 
 void updateDisplay() {
-  static bool firstRun = true;
-  static float lastOutsideF = -999;
-  static float lastHvac1F = -999; 
-  static float lastHvac2F = -999;
+  tft.fillScreen(COLOR_BACKGROUND);
   
-  // Convert to Fahrenheit for comparison
-  float outsideTempF = celsiusToFahrenheit(outsideTemp);
-  float hvacTemp1F = celsiusToFahrenheit(hvacTemp1);
-  float hvacTemp2F = celsiusToFahrenheit(hvacTemp2);
+  // Title
+  tft.setTextColor(COLOR_PRIMARY);
+  tft.setFont(&FreeSansBold18pt7b);
+  tft.setCursor(60, 35);
+  tft.println("F150 Logger");
   
-  // Only redraw if values have changed by at least 1 degree F or first run
-  bool needsUpdate = firstRun;
-  bool outsideChanged = false;
-  bool hvac1Changed = false;
-  bool hvac2Changed = false;
+  // Status card
+  tft.fillRoundRect(20, 60, 280, 120, 5, COLOR_CARD_BG);
+  tft.drawRoundRect(20, 60, 280, 120, 5, COLOR_PRIMARY);
   
-  if (abs(outsideTempF - lastOutsideF) >= 1.0) {
-    lastOutsideF = outsideTempF;
-    outsideChanged = true;
-    needsUpdate = true;
-  }
-  if (abs(hvacTemp1F - lastHvac1F) >= 1.0) {
-    lastHvac1F = hvacTemp1F;
-    hvac1Changed = true;
-    needsUpdate = true;
-  }
-  if (abs(hvacTemp2F - lastHvac2F) >= 1.0) {
-    lastHvac2F = hvacTemp2F;
-    hvac2Changed = true;
-    needsUpdate = true;
-  }
+  tft.setTextColor(COLOR_TEXT);
+  tft.setFont(&FreeSans12pt7b);
+  tft.setCursor(30, 85);
+  tft.println("CAPTURING");
   
-  if (!needsUpdate) {
-    return;
-  }
+  tft.setFont(&FreeSans9pt7b);
+  tft.setCursor(30, 110);
+  tft.println("Messages: " + String(messageCount));
   
-  if (firstRun) {
-    // Draw all cards on first run
-    drawTempCard(60, 50, 200, 85, "OUTSIDE", outsideTemp, true);
-    drawTempCard(20, 150, 130, 80, "DRIVER ZONE", hvacTemp1, false);
-    drawTempCard(170, 150, 130, 80, "PASSENGER", hvacTemp2, false);
-    drawStatusBar();
-    firstRun = false;
-  } else {
-    // Only redraw changed cards
-    if (outsideChanged) {
-      drawTempCard(60, 50, 200, 85, "OUTSIDE", outsideTemp, true);
-    }
-    if (hvac1Changed) {
-      drawTempCard(20, 150, 130, 80, "DRIVER ZONE", hvacTemp1, false);
-    }
-    if (hvac2Changed) {
-      drawTempCard(170, 150, 130, 80, "PASSENGER", hvacTemp2, false);
-    }
-    
-    // Update status bar occasionally
-    static int statusCounter = 0;
-    if (++statusCounter >= 5) {
-      drawStatusBar();
-      statusCounter = 0;
-    }
-  }
+  float elapsed = (millis() - sessionStartTime) / 1000.0;
+  tft.setCursor(30, 130);
+  tft.println("Time: " + String(elapsed, 1) + "s");
   
-  lastUpdateTime = millis();
+  tft.setCursor(30, 150);
+  tft.println("Markers: " + String(markerCount));
+  
+  tft.setCursor(30, 165);
+  tft.println("Send 'x' for marker");
+  
+  // Instructions
+  tft.setTextColor(COLOR_SUCCESS);
+  tft.setFont(&FreeSans9pt7b);
+  tft.setCursor(20, 210);
+  tft.println("Serial Command: x");
+  tft.setCursor(20, 230);
+  tft.println("Mark HVAC start/stop points");
 }
 
-// Process real CAN messages from the vehicle
-void processCanMessages() {
-  static uint32_t totalMessages = 0;
-  static uint32_t lastCountTime = 0;
-  static uint32_t lastCandidateDisplayTime = 0;
-  static bool firstMessageReceived = false;
+void processSerialCommand() {
+  if (!Serial.available()) return;
   
-  // Using real CAN hardware with TWAI driver
-  twai_message_t message;
-  if (twai_receive(&message, pdMS_TO_TICKS(10)) == ESP_OK) {
-    // Count received messages
-    totalMessages++;
-    firstMessageReceived = true;
+  String command = Serial.readStringUntil('\n');
+  command.trim();
+  
+  if (command == "x" || command == "X") {
+    markerCount++;
+    unsigned long timestamp = millis();
+    unsigned long elapsed = timestamp - sessionStartTime;
     
-    // Enhanced logging for temperature detection
-    logDetailedCanMessage(message);
-    trackTemperatureCandidate(message);
+    // Output marker in CSV format
+    Serial.println("# MARKER_" + String(markerCount) + "," + String(timestamp) + "," + String(elapsed));
     
-    // Process received message (standard processing)
-    // printCanMessage(message.identifier, message.data, message.data_length_code);
-    
-    // Analyze for temperature data
-    analyzeCanMessage(message.identifier, message.data, message.data_length_code);
-    
-    // THESE ARE SUSPECTED IDs/BYTES - We're using the logger to verify them
-    
-    // Process climate control message (0x3D3) - Driver and Passenger temps
-    if (message.identifier == F150_CLIMATE_CONTROL_ID) {
-      // Driver temp (byte 0) and Passenger temp (byte 1) using standard automotive encoding
-      if (message.data_length_code >= 2) {
-        // Standard automotive temperature encoding: value - 40°C
-        hvacTemp1 = (message.data[0] - 40.0); // Driver temp
-        hvacTemp2 = (message.data[1] - 40.0); // Passenger temp
-        
-        // Log the found values
-        Serial.printf("[SUSPECTED] Climate Control - Driver: %.1f°C, Passenger: %.1f°C\n", 
-                      hvacTemp1, hvacTemp2);
-      }
-    }
-    
-    // Process ambient data message (0x3B3) - Outside temp data
-    else if (message.identifier == F150_AMBIENT_DATA_ID) {
-      if (message.data_length_code >= 8) {
-        // Get raw byte values for reference
-        uint8_t byte0 = message.data[0];
-        uint8_t byte1 = message.data[1]; // Using byte 1 for outside temp
-        uint8_t byte2 = message.data[2]; // Previous byte used
-        
-        // SUSPECTED ENCODING: Ford F150 may use half-degree precision on byte 1
-        // Formula: (value * 0.5) - 40
-        outsideTemp = (message.data[1] * 0.5) - 40.0;
-        
-        // Log the raw values and result
-        Serial.printf("[SUSPECTED_OAT] Raw values: %02X %02X %02X \n", byte0, byte1, byte2);
-        Serial.printf("[SUSPECTED_OAT] Outside Temp: %.1f°C (%.1f°F)\n", 
-                     outsideTemp, celsiusToFahrenheit(outsideTemp));
-      }
-    }
+    // Update display to show marker was received
+    tft.fillRect(200, 145, 100, 20, COLOR_CARD_BG);
+    tft.setTextColor(COLOR_SUCCESS);
+    tft.setFont(&FreeSans9pt7b);
+    tft.setCursor(200, 160);
+    tft.println("MARKER " + String(markerCount));
   }
-  
-  // Print connection status every 3 seconds
-  if (millis() - lastCountTime > 3000) {
-    lastCountTime = millis();
-    
-    if (!firstMessageReceived) {
-      Serial.println("NO CAN MESSAGES RECEIVED - Try reversing CAN_H and CAN_L connections!");
-    } else {
-      Serial.printf("CAN Status: Working! Messages received: %d\n", totalMessages);
-    }
-    
-    // Check TWAI status
-    twai_status_info_t status;
-    if (twai_get_status_info(&status) == ESP_OK) {
-      Serial.printf("Bus state: %s, RX msgs: %d, TX msgs: %d, RX errors: %d, TX errors: %d\n",
-                  status.state == TWAI_STATE_RUNNING ? "RUNNING" : "ERROR",
-                  status.msgs_to_rx, status.msgs_to_tx,
-                  status.rx_error_counter, status.tx_error_counter);
-    }
-  }
-  
-  // Display temperature candidates every 10 seconds
-  if (millis() - lastCandidateDisplayTime > 10000) {
-    lastCandidateDisplayTime = millis();
-    displayTemperatureCandidates();
-  }
-  
-  // Simulation disabled - we're now using real CAN messages
 }
 
 void loop() {
-  // REAL MODE - using actual/simulated CAN messages
-  // When connected to actual vehicle, comment out simulateTemperatures()
-  // simulateTemperatures();
+  static unsigned long lastDisplayUpdate = 0;
+  static unsigned long lastLEDTime = 0;
+  static bool ledState = false;
   
-  // Process CAN messages
-  processCanMessages();
+  // Check for serial commands
+  processSerialCommand();
   
-  // Update display regularly
-  static unsigned int displayCounter = 0;
-  displayCounter++;
-  
-  if (displayCounter >= 100) {  // Every 1 second
-    displayCounter = 0;
+  // Capture CAN messages continuously
+  twai_message_t message;
+  while (twai_receive(&message, pdMS_TO_TICKS(1)) == ESP_OK) {
+    unsigned long timestamp = millis();
+    unsigned long elapsed = timestamp - sessionStartTime;
     
-    // Toggle LED
-    ledState = !ledState;
-    digitalWrite(STATUS_LED_PIN, ledState);
+    // Output CSV format directly to serial
+    Serial.print(timestamp);
+    Serial.print(",");
+    Serial.print(elapsed);
+    Serial.print(",0x");
+    Serial.print(message.identifier, HEX);
+    Serial.print(",");
+    Serial.print(message.data_length_code);
     
-    // Update display
-    updateDisplay();
+    // Output data bytes
+    for (int i = 0; i < 8; i++) {
+      Serial.print(",");
+      if (i < message.data_length_code) {
+        Serial.print("0x");
+        if (message.data[i] < 16) Serial.print("0");
+        Serial.print(message.data[i], HEX);
+      }
+    }
     
-    // Debug output - temperatures only (CAN messages printed separately)
-    Serial.printf("Current Temps - Outside: %.1f°C (%.0f°F), Driver: %.1f°C (%.0f°F), Passenger: %.1f°C (%.0f°F)\n", 
-                  outsideTemp, celsiusToFahrenheit(outsideTemp),
-                  hvacTemp1, celsiusToFahrenheit(hvacTemp1), 
-                  hvacTemp2, celsiusToFahrenheit(hvacTemp2));
+    // Extended frame flag
+    Serial.print(",");
+    Serial.println(message.extd ? "true" : "false");
+    
+    messageCount++;
   }
   
-  delay(10);
+  // LED blink to show activity
+  if (millis() - lastLEDTime > 500) {
+    ledState = !ledState;
+    digitalWrite(STATUS_LED_PIN, ledState);
+    lastLEDTime = millis();
+  }
+  
+  // Update display every 2 seconds
+  if (millis() - lastDisplayUpdate > 2000) {
+    lastDisplayUpdate = millis();
+    
+    // Only update the counters to avoid full screen refresh
+    tft.fillRect(110, 95, 150, 70, COLOR_CARD_BG);
+    tft.setTextColor(COLOR_TEXT);
+    tft.setFont(&FreeSans9pt7b);
+    tft.setCursor(110, 110);
+    tft.println(String(messageCount));
+    
+    float elapsed = (millis() - sessionStartTime) / 1000.0;
+    tft.setCursor(110, 130);
+    tft.println(String(elapsed, 1) + "s");
+    
+    tft.setCursor(110, 150);
+    tft.println(String(markerCount));
+  }
+  
+  delay(1);
 }
