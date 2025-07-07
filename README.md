@@ -1,60 +1,75 @@
-# Ford F150 CAN Bus Analysis Project
+# Ford F150 Temperature Display System
 
-A comprehensive toolkit for capturing, visualizing, and decoding CAN bus data from Ford F150 vehicles (tested on 2011 model). This project combines ESP32-S3 board with a WCMCU-230 CAN transceiver and ILI9341 TFT display with Python visualization tools to reverse-engineer vehicle systems and discover ASCII-encoded control schemes.
+A production-ready Ford F150 temperature display system using ESP32-S3 with CAN bus integration and TFT display. This project provides a clean, automotive-grade interface showing outside air temperature, HVAC driver/passenger temperature settings, and fan speed with pixel-perfect text centering and professional styling.
 
 ## 🚗 Project Overview
 
-This project enables real-time monitoring and analysis of Ford F150 CAN bus communications at 125 kbps. It's particularly effective at discovering Ford's ASCII-encoded control systems, such as HVAC temperature controls that use printable ASCII characters instead of traditional binary encoding.
+This system captures and displays real-time Ford F150 climate control data via CAN bus at 125 kbps. It features a modern 4-card layout optimized for readability and includes special handling for HVAC off states, simulation mode for testing, and optional CSV logging for data analysis.
 
 ### Key Features
 
-- **Real-time CAN bus capture** at 125 kbps with ESP32
-- **Visual grid interface** showing all PIDs and bytes with change highlighting
-- **ASCII/HEX toggle mode** to discover text-based encoding schemes
-- **Temperature calibration system** for reverse-engineering sensor formulas
-- **Marker-based logging** for correlating changes with user actions
-- **Multi-cell analysis** for discovering relationships between bytes
+- **Real-time Temperature Display** - OAT, driver/passenger HVAC temps, and fan speed
+- **Professional UI** - 4-card layout with pixel-perfect text centering and TrueType fonts
+- **HVAC State Handling** - Blank display for disabled/off climate controls
+- **Simulation Mode** - Built-in test mode cycling through various temperature scenarios
+- **Adaptive Backlight** - PWM brightness control based on console dimming level
+- **Optional CSV Logging** - Data capture for serial visualization tools (toggleable)
+- **Parameterized Design** - Easy customization of fonts, colors, and layout
 
 ## 📁 Project Structure
 
-```
+```text
 .
 ├── src/
-│   ├── main.cpp              # Raw CAN logger with TFT display
-│   └── main.cpp.save.display # Backup/alternative display version
-├── can_visual_grid.py        # Python visualization tool
-├── F150_*.md                 # Decoded system documentation
+│   ├── main.cpp                  # Production temperature display system
+│   └── main.cpp.save.logger      # Original CAN logger (backup)
+├── include/
+│   ├── pins.h                    # Hardware pin assignments
+│   └── colors.h                  # TFT display color definitions
+├── can_visual_grid.py            # Python visualization tool (legacy)
+├── F150_*.md                     # Decoded system documentation
 │   ├── F150_CONSOLE_LIGHTS.md
 │   ├── F150_HVAC_FAN.md
 │   ├── F150_HVAC_TEMP.md
 │   └── F150_OAT.md
-├── platformio.ini            # ESP32 build configuration
-├── pyproject.toml           # Python dependencies
-└── README.md                # This file
+├── platformio.ini                # ESP32 build configuration
+├── pyproject.toml               # Python dependencies (for analysis tools)
+└── README.md                    # This documentation
 ```
 
 ## 🔧 Hardware Requirements
 
-### ESP32 CAN Logger Setup
+### ESP32 Temperature Display Setup
 
-- **ESP32 Development Board** (ESP32-S3 recommended)
-- **CAN Transceiver Module** (WCMCU-230)
+- **ESP32-S3 Development Board** (320KB RAM, 8MB Flash recommended)
+- **CAN Transceiver Module** (WCMCU-230 or MCP2551)
 - **ILI9341 TFT Display** (320x240, SPI interface)
+- **XPT2046 Touch Controller** (optional, for future expansion)
 
 ### Pin Configuration
 
+Pin assignments are defined in `include/pins.h`:
+
 ```cpp
 // CAN Bus pins
-#define CAN_TX_PIN 17
-#define CAN_RX_PIN 16
+#define CAN_TX_PIN 47
+#define CAN_RX_PIN 48
 
 // ILI9341 Display pins
-#define TFT_CS   5
-#define TFT_RST  4
-#define TFT_DC   2
-#define TFT_MOSI 9
-#define TFT_CLK  8
-#define TFT_MISO 7
+#define TFT_CS   45
+#define TFT_RST  0
+#define TFT_DC   35
+#define TFT_MOSI 36
+#define TFT_CLK  37
+#define TFT_LED  38  // Backlight control
+#define TFT_MISO 39
+
+// Touch Controller pins (XPT2046)
+#define TOUCH_CLK  40
+#define TOUCH_CS   41
+#define TOUCH_DIN  42
+#define TOUCH_DO   2
+#define TOUCH_IRQ  1
 
 // Status LED
 #define STATUS_LED_PIN 15
@@ -71,210 +86,189 @@ This project enables real-time monitoring and analysis of Ford F150 CAN bus comm
 
 ## 💻 Software Setup
 
-### ESP32 Firmware
+### ESP32 Temperature Display Firmware
 
 1. **Clone the repository** and navigate to the project directory
-2. **Install Uv** <https://uv.pnpm.io/>
-3. **Install Dependencies**: `uv sync`
-4. **Build and upload** the firmware:
+2. **Install PlatformIO** (if not already installed)
+3. **Build and upload** the temperature display firmware:
 
     ```bash
-    # Upload to ESP32
-    pio run -t upload
+    # Upload to ESP32-S3
+    pio run --target upload
 
-    # Monitor serial output
+    # Monitor serial output (optional)
     pio device monitor
     ```
 
-5. **Connect hardware** according to pin configuration above
-6. **Start vehicle** and verify CAN connection on display
+4. **Connect hardware** according to pin configuration above
+5. **Power on** - the system will auto-start in simulation mode for testing
+6. **Connect to vehicle CAN bus** to see live temperature data
 
-### Python Visualization Tool
+### Main System Components
 
-1. **Run the visual grid monitor**:
+#### `src/main.cpp` - Temperature Display System
 
-    ```bash
-    # Connect to ESP32 serial port
-    uv run can_visual_grid.py /dev/cu.wchusbserial56910252611
-    ```
+The main firmware provides a production-ready Ford F150 temperature display with:
 
-## 🎮 Using the Visual Grid Monitor
+- **4-Card Layout**: OAT (top-left), Driver Temp, Fan Speed, Passenger Temp (bottom row)
+- **CAN Bus Integration**: Decodes Ford F150 PIDs at 125 kbps
+  - `0x3C4` - Outside Air Temperature (bytes 6-7)
+  - `0x3C8` - HVAC Driver/Passenger Temps (ASCII encoded, bytes 0-3)
+  - `0x357` - Fan Speed (7 levels, byte 1)
+  - `0x3B3` - Console Dim Level (PWM backlight control, byte 3)
+- **Smart Display Logic**: Blank temperatures when HVAC is off/disabled
+- **Adaptive Backlight**: PWM brightness based on console dimming
+- **Simulation Mode**: Built-in test scenarios for development/demo
 
-### Display Modes
+#### `include/pins.h` - Hardware Configuration
 
-- **HEX Mode**: Shows raw hexadecimal values (default)
-- **ASCII Mode**: Shows ASCII characters, highlights printable text
-- **Toggle**: Press `A` to switch between modes
+Centralized pin assignments for ESP32-S3 connections.
 
-### Cell Selection and Analysis
+#### `include/colors.h` - Display Theme
 
-1. **Click cells** to select up to 2 for analysis
-2. **Purple cell**: First selection
-3. **Cyan cell**: Second selection
-4. **Information panel**: Shows ASCII interpretation and temperature calculations
+Defines the professional color scheme using 16-bit RGB565 format:
 
-### Color Coding
+- **COLOR_BACKGROUND** (`0x0841`) - Dark blue-grey background
+- **COLOR_CARD_BG** (`0x2124`) - Lighter grey for temperature cards
+- **COLOR_PRIMARY** (`0x07FF`) - Cyan accent color
+- **COLOR_TEXT** (`0xFFFF`) - White text
+- **COLOR_SUCCESS/WARNING/HOT** - Status and temperature-based colors
 
-- **Bright Green**: Recent changes (< 0.5 seconds)
-- **Green**: Recent changes (< 1 second)
-- **Yellow**: Somewhat recent (< 2 seconds)
-- **Light Green**: Printable ASCII characters (ASCII mode only)
-- **White**: No recent changes
+Colors can be easily customized by modifying the hex values in this file.
 
-### Temperature Calibration Mode
+## 📊 System Features
 
-1. **Select temperature sensor cells** (e.g., PID 0x3C4, bytes 6&7)
-2. **Press `T`** to enter calibration mode
-3. **Adjust vehicle controls** and input actual LCD readings when prompted
-4. **Press `T` again** to exit and calculate linear regression formula
+### Temperature Display Layout
 
-### Keyboard Controls
+**4-Card Professional Interface:**
+- **OAT Card** (top-left): Outside Air Temperature with "OAT" label
+- **DRIVER Card** (bottom-left): Driver HVAC temperature setting
+- **FAN Card** (bottom-center): Visual fan speed bars (7 levels)
+- **PASS Card** (bottom-right): Passenger HVAC temperature setting
 
-- `A` - Toggle ASCII/HEX display mode
-- `T` - Toggle temperature calibration mode
-- `C` - Clear cell selection
-- `↑↓` - Scroll through PIDs
-- `ESC` - Exit application
+### Smart Display Features
 
-### Marker System
+- **Pixel-Perfect Centering**: All temperature values are precisely centered using TrueType fonts
+- **Blank State Handling**: Cards show blank when HVAC is off or controls are disabled
+- **Adaptive Backlight**: Display brightness automatically adjusts based on console dimming
+- **Professional Styling**: Rounded cards, consistent spacing, automotive-grade appearance
 
-Send `x` via serial console to insert markers for correlating data with specific actions (e.g., "start HVAC adjustment").
+### HVAC State Detection
 
-## 📊 Decoded Systems
+- **HVAC Off**: When driver temp is 0x00,0x00, display shows blank and fan speed goes to 0
+- **Passenger Disabled**: Passenger temp shows blank when controls are disabled
+- **Normal Operation**: All temperatures display with clean numeric values (no "F" suffix)
+- **Fan Visualization**: Horizontal bars indicate fan speed levels 0-7
 
-This project has successfully reverse-engineered several F150 systems. Each system is documented in dedicated markdown files with complete decoding formulas:
+### Simulation Mode
 
-- [F150_HVAC_TEMP.md](F150_HVAC_TEMP.md)
-- [F150_HVAC_FAN.md](F150_HVAC_FAN.md)
-- [F150_OAT.md](F150_OAT.md)
-- [F150_CONSOLE_LIGHTS.md](F150_CONSOLE_LIGHTS.md)
+**Built-in Test Scenarios** (6-second cycles):
+1. **Normal Operation** - All temps active, fan running
+2. **HVAC System Off** - Driver blank, fan 0, passenger may be active
+3. **Passenger Disabled** - Passenger blank, driver/fan normal
+4. **All HVAC Off** - Both temps blank, fan 0
+5. **Mixed States** - Various combinations for testing
 
-## 🔧 Development Workflow
+### Optional CSV Logging
 
-### 1. Data Capture Phase
+**Data Capture for Analysis:**
+- **Toggle Control**: Set `enableCSVLogging = true` in code
+- **CSV Format**: Timestamp, CAN ID, raw bytes, decoded temperatures
+- **Serial Output**: Compatible with visualization tools
+- **Performance**: Minimal overhead when enabled, zero when disabled
 
-```bash
-# Start ESP32 logger
-pio run -t upload
+## 🔍 CAN Bus Analysis Tools
 
-# Capture specific system in Python
-uv run can_visual_grid.py /dev/ttyUSB0
+For reverse-engineering additional Ford F150 systems and analyzing CAN bus data, see the comprehensive analysis tools documentation:
+
+**[CAN_ANALYSIS_README.md](CAN_ANALYSIS_README.md)**
+
+Includes:
+- Interactive CAN message visualization (`can_visual_grid.py`)
+- Raw CAN logger firmware
+- Complete reverse-engineering workflow
+- Decoded system documentation
+- Temperature calibration tools
+
+## 🛠️ Usage
+
+### Normal Operation
+
+1. **Power On**: System starts automatically and shows simulation data
+2. **Connect to Vehicle**: CAN bus connection switches to live data
+3. **Display Updates**: Temperature cards update in real-time (10Hz refresh)
+4. **Backlight Control**: Display brightness adapts to console dimming
+
+### Configuration Options
+
+**CSV Logging** (in `main.cpp`):
+
+```cpp
+bool enableCSVLogging = false;  // Set to true for data capture
 ```
 
-### 2. ASCII Discovery Phase
 
-- Switch to ASCII mode (`A` key)
-- Look for green-highlighted printable characters
-- Select suspicious byte pairs for analysis
-- Ford often uses ASCII digits for human-readable values
+**Simulation Mode** (forced during development):
 
-### 3. Pattern Analysis
-
-- Select 1-2 cells showing interesting patterns
-- Use calibration mode for temperature sensors
-- Correlate changes with vehicle control adjustments
-- Document findings in new markdown files
-
-### 4. Validation
-
-- Test discovered formulas across temperature ranges
-- Verify with multiple vehicle states
-- Cross-reference with OBD-II data when available
-
-## 🚀 Production Implementation
-
-> **Note**: This section will be expanded when the production display application is developed.
-
-### Planned Features
-
-- Real-time dashboard display
-- Multiple system monitoring
-- User-friendly interface
-- Historical data logging
-- Alert systems for abnormal values
-
-### Target Hardware
-
-- Production-grade ESP32 module
-- Automotive-qualified components
-- Robust CAN interface
-- Enhanced display system
-
-### Software Architecture
-
-- Modular system design
-- Configurable PID monitoring
-- Over-the-air update capability
-- Data export functionality
-
-## 🔍 Technical Details
-
-### CAN Bus Configuration
-
-- **Speed**: 125 kbps (Ford F150 standard)
-- **Mode**: Listen-only (non-intrusive)
-- **Filter**: Accept all messages for discovery
-- **Protocol**: ISO 11898 (CAN 2.0)
-
-### Data Format
-
-The ESP32 outputs CSV format for easy analysis:
-```csv
-TIMESTAMP_MS,ELAPSED_MS,CAN_ID,LENGTH,BYTE0,BYTE1,BYTE2,BYTE3,BYTE4,BYTE5,BYTE6,BYTE7,EXTENDED
-1234567890,5000,0x3C8,8,0x37,0x35,0x37,0x30,0x00,0x00,0x00,0x00,false
+```cpp
+bool forceSimulation = true;   // Set to false for vehicle connection
 ```
 
-### Ford's ASCII Encoding Discovery
 
-This project's key insight is Ford's use of ASCII decimal encoding for human-readable diagnostics:
+### Hardware Customization
 
-- Temperature setpoints: ASCII digits "60"-"90"
-- Easy diagnostic reading without conversion
-- Backwards compatible with simple tools
-- Self-documenting protocol values
+- **Pin Assignments**: Modify `include/pins.h` for different ESP32 boards
+- **Display Colors**: Customize `include/colors.h` for different themes
+- **Card Layout**: Adjust constants at top of `main.cpp` for sizing/positioning
 
 ## 🛠️ Troubleshooting
 
-### Common Issues
+### Display Issues
 
-**No CAN messages received:**
+**Blank or corrupted display:**
 
-- Verify vehicle is running (some systems sleep when off)
+- Check SPI connections to ILI9341 (see `pins.h`)
+- Verify power supply stability (3.3V/5V)
+- Ensure correct pin definitions match your hardware
+
+
+**No temperature updates:**
+
+- Verify vehicle is running (systems sleep when off)
 - Check CAN H/L connections and polarity
-- Ensure proper termination resistance
-- Verify baud rate (125 kbps for F150)
+- Monitor serial output for CAN message reception
+- Try simulation mode first (`forceSimulation = true`)
 
-**Display not working:**
 
-- Check SPI connections to ILI9341
-- Verify power supply stability
-- Ensure proper pin definitions in code
+**Backlight not working:**
 
-**Python visualization issues:**
+- Check TFT_LED pin connection (see `pins.h`)
+- Verify PWM output is functioning
+- Test with manual brightness setting
 
-- Check serial port permissions on Linux
-- Verify correct COM port on Windows
 
-### Debugging Tips
+### Performance Issues
 
-1. **Monitor serial output** for connection status
-2. **Use oscilloscope** to verify CAN signal integrity
-3. **Check termination** - 120Ω between CAN H and CAN L
-4. **Test with known-good CAN tools** first
+**Slow or flickering display:**
 
-## 📝 Contributing
+- Check power supply current capacity
+- Verify SPI clock speed settings
+- Monitor for memory issues in serial output
 
-### Adding New Systems
 
-1. **Capture data** using the visual grid tool
-2. **Document findings** using the template format (see existing `F150_*.md` files)
-3. **Include decoding formulas** with clear examples
-4. **Test across multiple conditions** for validation
+**CAN bus connection problems:**
 
-## 📚 References
+- Ensure 125 kbps baud rate
+- Verify CAN transceiver (MCU-230 recommended)
+- Check termination resistance (120Ω)
 
-- [ISO 11898 CAN Standard](https://www.iso.org/standard/63648.html)
-- [ESP32 TWAI Documentation](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/twai.html)
+
+### Development Tips
+
+1. **Start with simulation mode** - validates display without vehicle
+2. **Monitor serial output** - shows CAN status and decoded values
+3. **Use CSV logging** - captures data for offline analysis
+4. **Test incrementally** - verify each system (display, CAN, decoding) separately
 
 ## 🤝 License
 
@@ -282,4 +276,4 @@ MIT License
 
 ---
 
-Happy CAN bus hacking! 🚗💻
+## Ready for your F150 dashboard! 🚗📊
