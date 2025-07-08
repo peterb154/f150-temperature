@@ -77,7 +77,7 @@ unsigned long lastSimulationUpdate = 0;
 bool enableCSVLogging = false;  // Set to true to enable CSV output
 unsigned long sessionStartTime = 0;
 unsigned long messageCount = 0;
-bool simulationMode = true; // Force simulation for testing
+bool simulationMode = false; // Force simulation for testing
 
 // Function prototypes
 void setup();
@@ -95,6 +95,7 @@ int decodeHVACTemp(uint8_t byte0, uint8_t byte1);
 int decodeFanSpeed(uint8_t byte3);
 int decodeConsoleDim(uint8_t byte3);
 void setBacklightBrightness(int level);
+void drawBrightnessIndicator();
 
 // Arduino Setup Function
 void setup() {
@@ -166,8 +167,8 @@ void initCAN() {
   }
   
   if (twai_start() == ESP_OK) {
-    Serial.println("CAN driver started - but FORCING simulation mode for testing");
-    simulationMode = true; // Force simulation for testing
+    Serial.println("CAN driver started successfully");
+    // simulationMode remains as initialized (false for normal operation)
   } else {
     Serial.println("Failed to start CAN driver - entering simulation mode");
     simulationMode = true;
@@ -398,6 +399,9 @@ void updateDisplay() {
     tft.fillRect(80, 105, 160, 25, COLOR_BACKGROUND);
     simModeShown = false;
   }
+  
+  // Brightness indicator - discrete dot display in top right
+  drawBrightnessIndicator();
 }
 
 // Draw Outside Air Temperature Card
@@ -500,14 +504,12 @@ void drawFanCard(int x, int y, int w, int h, int fanLevel) {
 
 // Decode Outside Air Temperature from CAN bytes 6-7
 float decodeOAT(uint8_t byte6, uint8_t byte7) {
-  // Combine bytes 6-7 into 16-bit value
-  uint16_t rawValue = (byte6 << 8) | byte7;
+  // Ford encodes outside air temperature in Celsius with 128 offset
+  // Formula from F150_OAT.md: temp_f = ((byte6 - 128) * 1.8) + 32
+  // Primary temperature is in byte6, byte7 provides sub-degree precision
   
-  // Convert to Celsius (subtract offset of 128)
-  float celsius = (rawValue / 128.0) - 128.0;
-  
-  // Convert to Fahrenheit
-  return (celsius * 9.0 / 5.0) + 32.0;
+  float celsius = byte6 - 128;
+  return (celsius * 1.8) + 32.0;
 }
 
 // Decode HVAC Temperature from ASCII decimal bytes
@@ -527,27 +529,33 @@ int decodeHVACTemp(uint8_t byte0, uint8_t byte1) {
 
 // Decode Fan Speed from byte 3 (7 discrete levels)
 int decodeFanSpeed(uint8_t byte3) {
-  // Map raw byte value to fan speed level 0-7
-  if (byte3 == 0x00) return 0;
-  if (byte3 <= 0x20) return 1;
-  if (byte3 <= 0x40) return 2;
-  if (byte3 <= 0x60) return 3;
-  if (byte3 <= 0x80) return 4;
-  if (byte3 <= 0xA0) return 5;
-  if (byte3 <= 0xC0) return 6;
-  return 7;
+  // Direct byte value to fan speed mapping from F150_HVAC_FAN.md
+  // Each level decreases by 0x04 (4 decimal) from 0x1C down to 0x04
+  switch(byte3) {
+    case 0x1C: return 7;  // HIGH (Maximum airflow)
+    case 0x18: return 6;  // High-medium  
+    case 0x14: return 5;  // Medium-high
+    case 0x10: return 4;  // Medium
+    case 0x0C: return 3;  // Medium-low
+    case 0x08: return 2;  // Low-medium
+    case 0x04: return 1;  // LOW (Minimum airflow)
+    default:   return 0;  // OFF or Unknown
+  }
 }
 
 // Decode Console Dimming Level from byte 3 (6 discrete levels)
 int decodeConsoleDim(uint8_t byte3) {
-  // Map raw byte value to dimming level 0-6
-  if (byte3 == 0x00) return 0;
-  if (byte3 <= 0x2A) return 1;
-  if (byte3 <= 0x55) return 2;
-  if (byte3 <= 0x80) return 3;
-  if (byte3 <= 0xAA) return 4;
-  if (byte3 <= 0xD5) return 5;
-  return 6;
+  // Direct byte value to dimming level mapping from F150_CONSOLE_LIGHTS.md
+  // Sequential hex values from 0x0D to 0x12 (levels 1-6)
+  switch(byte3) {
+    case 0x12: return 6;  // HIGH (Maximum brightness)
+    case 0x11: return 5;  // High-medium
+    case 0x10: return 4;  // Medium-high  
+    case 0x0F: return 3;  // Medium
+    case 0x0E: return 2;  // Medium-low
+    case 0x0D: return 1;  // LOW (Minimum brightness)
+    default:   return 0;  // OFF or Unknown
+  }
 }
 
 // Set TFT Backlight Brightness based on console dimming level
@@ -555,4 +563,36 @@ void setBacklightBrightness(int level) {
   // Map dimming level 0-6 to PWM value 0-255
   int pwmValue = map(level, 0, 6, 0, 255);
   analogWrite(TFT_LED, pwmValue);
+}
+
+// Draw discrete brightness indicator in top right corner
+void drawBrightnessIndicator() {
+  // Small indicator area: 30x10 pixels in top right
+  int indicatorX = 285;  // 320 - 35 (margin)
+  int indicatorY = 5;
+  int dotSize = 3;
+  int spacing = 4;
+  
+  static int prevConsoleDimLevel = -1;
+  
+  // Only redraw if brightness changed
+  if (consoleDimLevel != prevConsoleDimLevel) {
+    // Clear the indicator area
+    tft.fillRect(indicatorX, indicatorY, 30, 10, COLOR_BACKGROUND);
+    
+    // Draw 6 small dots representing brightness levels
+    for (int i = 0; i < 6; i++) {
+      int dotX = indicatorX + (i * spacing);
+      int dotY = indicatorY + 2;
+      
+      // Filled dot if brightness level is active, empty outline if not
+      if (i < consoleDimLevel) {
+        tft.fillCircle(dotX, dotY, dotSize/2, COLOR_PRIMARY);  // Active level
+      } else {
+        tft.drawCircle(dotX, dotY, dotSize/2, COLOR_TEXT);     // Inactive level
+      }
+    }
+    
+    prevConsoleDimLevel = consoleDimLevel;
+  }
 }
