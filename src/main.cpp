@@ -47,6 +47,11 @@
 #define PID_HVAC_TEMP     0x3C8  // HVAC Temperature Settings
 #define PID_HVAC_FAN      0x357  // HVAC Fan Speed
 #define PID_CONSOLE_LIGHTS 0x3B3 // Console Light Dimming
+#define PID_VEHICLE_SPEED 0x423  // Vehicle Speed
+
+// OAT damping: engine heat skews the sensor high when slow or stopped
+#define OAT_MOVING_MPH    20     // Above this speed...
+#define OAT_MOVING_MS     30000  // ...for this long, trust the raw OAT
 
 // Console dim scale: night mode uses 1-12, day mode uses 13-18
 #define NIGHT_MAX_LEVEL    12
@@ -59,7 +64,9 @@
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_MOSI, TFT_CLK, TFT_RST, TFT_MISO);
 
 // Display data variables
-float outsideTemp = 72.0;     // Outside Air Temperature (°F)
+float outsideTemp = 72.0;     // Outside Air Temperature (°F), damped for display
+bool oatSeeded = false;       // First OAT reading is shown as-is
+unsigned long movingSince = 0; // millis() when speed went above OAT_MOVING_MPH, 0 = slow
 int driverTempSet = 72;       // Driver temperature setting (°F)
 int passengerTempSet = 70;    // Passenger temperature setting (°F)
 int fanSpeed = 3;             // Fan speed level (0-7)
@@ -98,6 +105,8 @@ void drawTempCard(int x, int y, int w, int h, const char* label, int temp);
 void drawFanCard(int x, int y, int w, int h, int fanLevel);
 void drawOATCard(int x, int y, int w, int h, float temp);
 float decodeOAT(uint8_t byte6, uint8_t byte7);
+float decodeSpeedMph(uint8_t byte0, uint8_t byte1);
+void updateOAT(float rawOAT);
 int decodeHVACTemp(uint8_t byte0, uint8_t byte1);
 int decodeFanSpeed(uint8_t byte3);
 int decodeConsoleDim(uint8_t byte3);
@@ -223,7 +232,18 @@ void processCanMessages() {
     switch (message.identifier) {
       case PID_OAT: // Outside Air Temperature
         if (message.data_length_code >= 8) {
-          outsideTemp = decodeOAT(message.data[6], message.data[7]);
+          updateOAT(decodeOAT(message.data[6], message.data[7]));
+        }
+        break;
+
+      case PID_VEHICLE_SPEED: // Vehicle Speed
+        if (message.data_length_code >= 2) {
+          float mph = decodeSpeedMph(message.data[0], message.data[1]);
+          if (mph <= OAT_MOVING_MPH) {
+            movingSince = 0;
+          } else if (movingSince == 0) {
+            movingSince = millis();
+          }
         }
         break;
         
@@ -368,7 +388,7 @@ void updateDisplay() {
   }
   
   // Only redraw cards that have changed data
-  if (abs(outsideTemp - prevOutsideTemp) > 0.1) {
+  if (lround(outsideTemp) != lround(prevOutsideTemp)) {
     drawOATCard(OAT_X, OAT_Y, OAT_WIDTH, OAT_HEIGHT, outsideTemp);
     prevOutsideTemp = outsideTemp;
   }
@@ -513,14 +533,30 @@ void drawFanCard(int x, int y, int w, int h, int fanLevel) {
   }
 }
 
-// Decode Outside Air Temperature from CAN bytes 6-7
+// Decode Outside Air Temperature from CAN bytes 6-7 (see F150_OAT.md)
+// Byte 6 is whole °C + 128, top 2 bits of byte 7 are quarter degrees
 float decodeOAT(uint8_t byte6, uint8_t byte7) {
-  // Ford encodes outside air temperature in Celsius with 128 offset
-  // Formula from F150_OAT.md: temp_f = ((byte6 - 128) * 1.8) + 32
-  // Primary temperature is in byte6, byte7 provides sub-degree precision
-  
-  float celsius = byte6 - 128;
+  int raw = (byte6 << 2) | (byte7 >> 6);
+  float celsius = raw / 4.0 - 128;
   return (celsius * 1.8) + 32.0;
+}
+
+// Decode Vehicle Speed from CAN bytes 0-1 (see F150_SPEED.md)
+// Big-endian, 0.01 km/h per bit, offset 10000 (= stopped)
+float decodeSpeedMph(uint8_t byte0, uint8_t byte1) {
+  int raw = (byte0 << 8) | byte1;
+  float kph = (raw - 10000) / 100.0;
+  return kph / 1.609;
+}
+
+// Engine heat only pushes the OAT sensor high. When moving fast enough for
+// long enough, show the raw reading. Otherwise only let the display drop.
+void updateOAT(float rawOAT) {
+  bool atSpeed = movingSince != 0 && millis() - movingSince > OAT_MOVING_MS;
+  if (!oatSeeded || atSpeed || rawOAT < outsideTemp) {
+    outsideTemp = rawOAT;
+    oatSeeded = true;
+  }
 }
 
 // Decode HVAC Temperature from ASCII decimal bytes
