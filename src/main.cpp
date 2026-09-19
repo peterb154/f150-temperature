@@ -48,6 +48,13 @@
 #define PID_HVAC_FAN      0x357  // HVAC Fan Speed
 #define PID_CONSOLE_LIGHTS 0x3B3 // Console Light Dimming
 
+// Console dim scale: night mode uses 1-12, day mode uses 13-18
+#define NIGHT_MAX_LEVEL    12
+#define MAX_DIM_LEVEL      18
+#define MIN_BACKLIGHT_PWM  15  // Never fully dark, even at lowest night dimmer
+#define NIGHT_MAX_PWM      170
+#define DAY_MIN_PWM        60  // Day gets its own range so the dimmer is visible
+
 // Create TFT instance
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_MOSI, TFT_CLK, TFT_RST, TFT_MISO);
 
@@ -56,7 +63,7 @@ float outsideTemp = 72.0;     // Outside Air Temperature (°F)
 int driverTempSet = 72;       // Driver temperature setting (°F)
 int passengerTempSet = 70;    // Passenger temperature setting (°F)
 int fanSpeed = 3;             // Fan speed level (0-7)
-int consoleDimLevel = 6;      // Console brightness (0-6)
+int consoleDimLevel = MAX_DIM_LEVEL; // Console brightness (1-18)
 bool dataReceived = false;
 
 // Previous values for dirty flag checking
@@ -240,8 +247,12 @@ void processCanMessages() {
         
       case PID_CONSOLE_LIGHTS: // Console Light Dimming
         if (message.data_length_code >= 4) {
-          consoleDimLevel = decodeConsoleDim(message.data[3]);
-          setBacklightBrightness(consoleDimLevel);
+          int level = decodeConsoleDim(message.data[3]);
+          // Ignore unknown values so the screen never goes dark
+          if (level > 0) {
+            consoleDimLevel = level;
+            setBacklightBrightness(consoleDimLevel);
+          }
         }
         break;
     }
@@ -543,25 +554,23 @@ int decodeFanSpeed(uint8_t byte3) {
   }
 }
 
-// Decode Console Dimming Level from byte 3 (6 discrete levels)
+// Decode Console Dimming Level from byte 3 (see F150_CONSOLE_LIGHTS.md)
+// Night mode: 0x01-0x0C, day mode: 0x0D-0x12. Returns 0 for unknown values.
 int decodeConsoleDim(uint8_t byte3) {
-  // Direct byte value to dimming level mapping from F150_CONSOLE_LIGHTS.md
-  // Sequential hex values from 0x0D to 0x12 (levels 1-6)
-  switch(byte3) {
-    case 0x12: return 6;  // HIGH (Maximum brightness)
-    case 0x11: return 5;  // High-medium
-    case 0x10: return 4;  // Medium-high  
-    case 0x0F: return 3;  // Medium
-    case 0x0E: return 2;  // Medium-low
-    case 0x0D: return 1;  // LOW (Minimum brightness)
-    default:   return 0;  // OFF or Unknown
+  if (byte3 >= 1 && byte3 <= MAX_DIM_LEVEL) {
+    return byte3;
   }
+  return 0;
 }
 
 // Set TFT Backlight Brightness based on console dimming level
 void setBacklightBrightness(int level) {
-  // Map dimming level 0-6 to PWM value 0-255
-  int pwmValue = map(level, 0, 6, 0, 255);
+  int pwmValue;
+  if (level <= NIGHT_MAX_LEVEL) {
+    pwmValue = map(level, 1, NIGHT_MAX_LEVEL, MIN_BACKLIGHT_PWM, NIGHT_MAX_PWM);
+  } else {
+    pwmValue = map(level, NIGHT_MAX_LEVEL + 1, MAX_DIM_LEVEL, DAY_MIN_PWM, 255);
+  }
   analogWrite(TFT_LED, pwmValue);
 }
 
@@ -580,13 +589,14 @@ void drawBrightnessIndicator() {
     // Clear the indicator area
     tft.fillRect(indicatorX, indicatorY, 30, 10, COLOR_BACKGROUND);
     
-    // Draw 6 small dots representing brightness levels
+    // Draw 6 small dots representing brightness levels (3 dim levels per dot)
+    int activeDots = (consoleDimLevel + 2) / 3;
     for (int i = 0; i < 6; i++) {
       int dotX = indicatorX + (i * spacing);
       int dotY = indicatorY + 2;
       
       // Filled dot if brightness level is active, empty outline if not
-      if (i < consoleDimLevel) {
+      if (i < activeDots) {
         tft.fillCircle(dotX, dotY, dotSize/2, COLOR_PRIMARY);  // Active level
       } else {
         tft.drawCircle(dotX, dotY, dotSize/2, COLOR_TEXT);     // Inactive level

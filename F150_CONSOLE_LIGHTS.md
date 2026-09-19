@@ -4,54 +4,43 @@
 
 - **PID**: `0x3B3`
 - **Console Dimming**: Byte 3
-- **Encoding**: Sequential hex values (6 discrete levels)
+- **Day/Night Mode**: Byte 0 (`0x00` = day, `0x04` = night)
+- **Encoding**: One continuous brightness scale, `0x01`–`0x12` (1–18)
 
 ## 💡 Dimming Level Values
 
-```cpp
-// Direct byte value to dimming level mapping
-switch(byte3) {
-   case 0x12: return "HIGH (Level 6)";
-   case 0x11: return "Level 5";
-   case 0x10: return "Level 4";
-   case 0x0F: return "Level 3";
-   case 0x0E: return "Level 2";
-   case 0x0D: return "LOW (Level 1)";
-   default:   return "OFF or Unknown";
-}
+The dash light sensor switches between day and night mode. Each mode uses a
+different slice of the same scale:
+
+| Mode  | Byte0  | Byte2  | Byte3 (dimmer low → high) | Steps |
+|-------|--------|--------|---------------------------|-------|
+| Day   | `0x00` | `0x05` | `0x0D` → `0x12`           | 6     |
+| Night | `0x04` | `0x04` | `0x01` → `0x0C`           | 12    |
+
+Example frames (captured 2026-09-18):
+
+```text
+day   full high: 00 43 05 12 00 00 00 38
+day   full low:  00 43 05 0D 00 00 00 38
+night full high: 04 83 04 0C 00 00 00 38
+night full low:  04 83 04 01 00 00 00 38
 ```
 
-| Byte3 Value | Dim Level | Brightness | Notes |
-|-------------|-----------|------------|-------|
-| 0x12        | 6         | HIGH       | Maximum brightness |
-| 0x11        | 5         | -          | High-medium |
-| 0x10        | 4         | -          | Medium-high |
-| 0x0F        | 3         | -          | Medium |
-| 0x0E        | 2         | -          | Medium-low |
-| 0x0D        | 1         | LOW        | Minimum brightness |
-| Other       | 0         | OFF        | Unknown |
+Byte 1 toggles between `0x40`/`0x43` (day) and `0x80`/`0x83` (night); not used.
 
-## 🔬 Engineering Details
-
-- Encoding: Simple descending sequential pattern
-- Resolution: 6 discrete brightness levels
-- Pattern: Each level decreases by 1 (0x01)
-- Range: 0x0D to 0x12 (13 to 18 decimal)
-
-## 🧮 Alternative Formula
+## 🧮 Decoding
 
 ```cpp
-// Calculate dimming level from byte value
-if (byte3 >= 0x0D && byte3 <= 0x12) {
-    dim_level = byte3 - 0x0C;  // Results in 1-6
-} else {
-    dim_level = 0;  // OFF or invalid
+// Byte 3 is the brightness level directly; anything else is unknown
+if (byte3 >= 0x01 && byte3 <= 0x12) {
+    dim_level = byte3;  // 1-18
 }
 ```
 
 ## 🚗 Implementation Notes
 
 - Works for 2011+ F150 with console dimming controls
-- Update rate: Real-time with dimmer button adjustment
-- Sequential encoding: each level = previous level - 1
-- Covers dashboard, radio, and HVAC display brightness
+- Update rate: ~1 Hz, plus immediately on dimmer change
+- Unknown values are ignored so the display keeps its last brightness
+- Backlight PWM never drops below `MIN_BACKLIGHT_PWM` so the display is always readable
+- Early versions only mapped the day range (`0x0D`–`0x12`), which blanked the display in night mode (#1)
