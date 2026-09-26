@@ -53,3 +53,20 @@ does not broadcast a filtered OAT, so the display damps it:
 - **Above 20 mph for 30 s** (speed from `0x423`, see `F150_SPEED.md`): show the raw reading
 - **Otherwise**: the display can only drop — engine heat only biases the sensor high
 - **Boot**: the first reading is shown as-is (may read high if heat-soaked, like the factory dash)
+
+## 🔒 Display Hysteresis
+
+Damping stops the *value* drifting, but the shown whole degree still flickered at
+speed: sensor resolution is 0.45°F, so a reading parked near a half-degree
+boundary crossed it on one quantisation step and the display alternated between
+two numbers (#7).
+
+The displayed degree now carries a dead band — it only moves once the reading
+clears it by `OAT_HYSTERESIS_F` (0.7°F), which is more than one sensor step:
+
+```cpp
+long displayedOAT(float raw, long shown, float hysteresis);  // include/oat_logic.h
+```
+
+Shown 72 changes to 73 at 72.7 and to 71 at 71.3, so real movement still tracks
+while dither does not. Unit tested in `test/test_oat_logic/`.
