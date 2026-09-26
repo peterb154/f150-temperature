@@ -8,6 +8,7 @@
 #include <XPT2046_Touchscreen.h>
 #include <Preferences.h>
 #include <flood_logic.h>
+#include <oat_logic.h>
 #include <stdint.h>
 #include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
@@ -80,6 +81,9 @@
 // OAT damping: engine heat skews the sensor high when slow or stopped
 #define OAT_MOVING_MPH    20     // Above this speed...
 #define OAT_MOVING_MS     30000  // ...for this long, trust the raw OAT
+// Dead band on the displayed degree. Larger than one 0.45 F sensor step, so
+// quantisation noise near a boundary cannot flip the number (see #7).
+#define OAT_HYSTERESIS_F  0.7f
 
 // Console dim scale: night mode uses 1-12, day mode uses 13-18
 #define NIGHT_MAX_LEVEL    12
@@ -116,11 +120,10 @@ int consoleDimLevel = MAX_DIM_LEVEL; // Console brightness (1-18)
 bool dataReceived = false;
 
 // Previous values for dirty flag checking
-float prevOutsideTemp = -999.0;
+long shownOAT = OAT_DISPLAY_UNSET;  // whole degrees currently on screen
 int prevDriverTempSet = -1;
 int prevPassengerTempSet = -1;
 int prevFanSpeed = -1;
-bool needsFullRedraw = true;
 
 // Display update tracking
 unsigned long lastDisplayUpdate = 0;
@@ -449,16 +452,11 @@ void simulateData() {
 
 // Update Display with Smart Redrawing (only when data changes)
 void updateDisplay() {
-  // Check if full redraw is needed (first time or simulation mode change)
-  if (needsFullRedraw) {
-    tft.fillScreen(COLOR_BACKGROUND);
-    needsFullRedraw = false;
-  }
-  
   // Only redraw cards that have changed data
-  if (lround(outsideTemp) != lround(prevOutsideTemp)) {
-    drawOATCard(OAT_X, OAT_Y, OAT_WIDTH, OAT_HEIGHT, outsideTemp);
-    prevOutsideTemp = outsideTemp;
+  long wantOAT = displayedOAT(outsideTemp, shownOAT, OAT_HYSTERESIS_F);
+  if (wantOAT != shownOAT) {
+    shownOAT = wantOAT;
+    drawOATCard(OAT_X, OAT_Y, OAT_WIDTH, OAT_HEIGHT, (float)shownOAT);
   }
   
   if (driverTempSet != prevDriverTempSet) {
