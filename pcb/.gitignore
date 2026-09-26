@@ -1,0 +1,10 @@
+# VS Code Local History extension (contains its own nested git repo)
+.history/
+
+# KiCad lock files, backups and user-local state
+~*.lck
+*-backups/
+*.kicad_pcb.bak
+*.kicad_sch.bak
+*.kicad_prl
+fp-info-cache
