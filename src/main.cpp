@@ -5,6 +5,8 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
 #include <driver/twai.h>
+#include <XPT2046_Touchscreen.h>
+#include <Preferences.h>
 #include <stdint.h>
 #include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
@@ -30,6 +32,30 @@
 #define FAN_X (DRIVER_X + CARD_WIDTH + CARD_SPACING)
 #define PASS_X (FAN_X + CARD_WIDTH + CARD_SPACING)
 
+// Flood light button - top-right grid slot (OAT's row, PASS's column)
+#define FLOOD_X PASS_X
+#define FLOOD_Y OAT_Y
+#define FLOOD_W OAT_WIDTH
+#define FLOOD_H OAT_HEIGHT
+
+// Touch calibration: raw XPT2046 ADC range. Tune from the serial output.
+#define TOUCH_RAW_MINX 780
+#define TOUCH_RAW_MAXX 3100
+#define TOUCH_RAW_MINY 800
+#define TOUCH_RAW_MAXY 2830
+#define TOUCH_HIT_MARGIN 8   // forgiveness around the button edge
+
+// "OFF" is three wide glyphs; the 24pt value font overflows a 90px card
+#define FLOOD_STATE_FONT &FreeSansBold18pt7b
+
+// High beam arming. Measured stalk toggles ran 1.0-1.7 s, and this truck has no
+// separate flash-to-pass, so the delay must outlast a flash or the bar strobes
+// oncoming traffic. Turning off is immediate; only turning on waits.
+#define HIGH_BEAM_MASK      0x02
+#define HIGH_BEAM_ARM_MS    2500
+#define HIGH_BEAM_STALE_MS  3000   // no 0x3C3 for this long -> assume beams off
+#define TOUCH_DEBOUNCE_MS 250
+
 // Font sizes
 #define LABEL_FONT &FreeSans9pt7b
 #define VALUE_FONT &FreeSansBold24pt7b  // Larger font
@@ -48,6 +74,7 @@
 #define PID_HVAC_FAN      0x357  // HVAC Fan Speed
 #define PID_CONSOLE_LIGHTS 0x3B3 // Console Light Dimming
 #define PID_VEHICLE_SPEED 0x423  // Vehicle Speed
+#define PID_LIGHTING      0x3C3  // Headlamp / high beam (see F150_HIGH_BEAM.md)
 
 // OAT damping: engine heat skews the sensor high when slow or stopped
 #define OAT_MOVING_MPH    20     // Above this speed...
@@ -62,6 +89,21 @@
 
 // Create TFT instance
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_MOSI, TFT_CLK, TFT_RST, TFT_MISO);
+// IRQ mode is required: with the IRQ pin omitted the library never reports a
+// touch on this hardware. Verified by testing both ways in the truck.
+XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
+
+// Flood light state. Mode is what the button selects; lit is what the pin does.
+enum FloodMode { FLOOD_OFF, FLOOD_ON, FLOOD_ARMED };
+FloodMode floodMode = FLOOD_OFF;
+FloodMode prevFloodMode = FLOOD_ARMED;  // mismatch forces the first draw
+bool floodLit = false;
+bool prevFloodLit = true;
+
+bool highBeamOn = false;
+unsigned long highBeamSince = 0;    // when the beams last came on
+unsigned long lastLightingMsg = 0;  // for the stale-bus watchdog
+Preferences floodPrefs;
 
 // Display data variables
 float outsideTemp = 72.0;     // Outside Air Temperature (°F), damped for display
@@ -78,7 +120,6 @@ float prevOutsideTemp = -999.0;
 int prevDriverTempSet = -1;
 int prevPassengerTempSet = -1;
 int prevFanSpeed = -1;
-int prevConsoleDimLevel = -1;
 bool needsFullRedraw = true;
 
 // Display update tracking
@@ -111,10 +152,17 @@ int decodeHVACTemp(uint8_t byte0, uint8_t byte1);
 int decodeFanSpeed(uint8_t byte3);
 int decodeConsoleDim(uint8_t byte3);
 void setBacklightBrightness(int level);
-void drawBrightnessIndicator();
+void initTouch();
+void handleTouch();
+void drawFloodCard(int x, int y, int w, int h, FloodMode mode, bool lit);
+void updateFlood();
 
 // Arduino Setup Function
 void setup() {
+  // Flood light off before anything else can run
+  pinMode(FLOOD_PIN, OUTPUT);
+  digitalWrite(FLOOD_PIN, LOW);
+
   Serial.begin(115200);
   
   if (enableCSVLogging) {
@@ -126,7 +174,16 @@ void setup() {
     Serial.println("F150 Temperature Display Starting...");
   }
   
+  // Restore the saved mode. ARM persists because that is the normal setting;
+  // ON deliberately does not, so a key-on never fires the bar by itself.
+  floodPrefs.begin("flood", false);
+  uint8_t savedMode = floodPrefs.getUChar("mode", FLOOD_OFF);
+  floodMode = savedMode == FLOOD_ARMED ? FLOOD_ARMED : FLOOD_OFF;
+
   initDisplay();
+  initTouch();
+  Serial.printf("Flood mode restored: saved=%u -> %s\n", savedMode,
+                floodMode == FLOOD_ARMED ? "ARM" : "OFF");
   initCAN();
   
   if (enableCSVLogging) {
@@ -138,7 +195,9 @@ void setup() {
 
 // Arduino Main Loop
 void loop() {
+  handleTouch();
   processCanMessages();
+  updateFlood();
   
   if (simulationMode && millis() - lastSimulationUpdate > 2000) {
     simulateData();
@@ -265,6 +324,15 @@ void processCanMessages() {
         }
         break;
         
+      case PID_LIGHTING: // Headlamp / high beam state
+        if (message.data_length_code >= 1) {
+          bool hb = (message.data[0] & HIGH_BEAM_MASK) != 0;
+          if (hb && !highBeamOn) highBeamSince = millis();
+          highBeamOn = hb;
+          lastLightingMsg = millis();
+        }
+        break;
+
       case PID_CONSOLE_LIGHTS: // Console Light Dimming
         if (message.data_length_code >= 4) {
           int level = decodeConsoleDim(message.data[3]);
@@ -431,8 +499,11 @@ void updateDisplay() {
     simModeShown = false;
   }
   
-  // Brightness indicator - discrete dot display in top right
-  drawBrightnessIndicator();
+  if (floodMode != prevFloodMode || floodLit != prevFloodLit) {
+    drawFloodCard(FLOOD_X, FLOOD_Y, FLOOD_W, FLOOD_H, floodMode, floodLit);
+    prevFloodMode = floodMode;
+    prevFloodLit = floodLit;
+  }
 }
 
 // Draw Outside Air Temperature Card
@@ -610,35 +681,91 @@ void setBacklightBrightness(int level) {
   analogWrite(TFT_LED, pwmValue);
 }
 
-// Draw discrete brightness indicator in top right corner
-void drawBrightnessIndicator() {
-  // Small indicator area: 30x10 pixels in top right
-  int indicatorX = 285;  // 320 - 35 (margin)
-  int indicatorY = 5;
-  int dotSize = 3;
-  int spacing = 4;
-  
-  static int prevConsoleDimLevel = -1;
-  
-  // Only redraw if brightness changed
-  if (consoleDimLevel != prevConsoleDimLevel) {
-    // Clear the indicator area
-    tft.fillRect(indicatorX, indicatorY, 30, 10, COLOR_BACKGROUND);
-    
-    // Draw 6 small dots representing brightness levels (3 dim levels per dot)
-    int activeDots = (consoleDimLevel + 2) / 3;
-    for (int i = 0; i < 6; i++) {
-      int dotX = indicatorX + (i * spacing);
-      int dotY = indicatorY + 2;
-      
-      // Filled dot if brightness level is active, empty outline if not
-      if (i < activeDots) {
-        tft.fillCircle(dotX, dotY, dotSize/2, COLOR_PRIMARY);  // Active level
-      } else {
-        tft.drawCircle(dotX, dotY, dotSize/2, COLOR_TEXT);     // Inactive level
-      }
-    }
-    
-    prevConsoleDimLevel = consoleDimLevel;
+
+// Initialize the XPT2046 touch controller.
+// The TFT is software-SPI on its own pins, so the hardware SPI bus is free.
+void initTouch() {
+  SPI.begin(TOUCH_CLK, TOUCH_DO, TOUCH_DIN, TOUCH_CS);
+  ts.begin();
+  ts.setRotation(1);  // match tft.setRotation(1)
+  Serial.println("Touch initialized");
+}
+
+// Toggle the flood light on a press (not a hold or a release)
+void handleTouch() {
+  static bool wasTouched = false;
+  static unsigned long lastToggle = 0;
+  static unsigned long lastLog = 0;
+
+  bool isTouched = ts.touched();
+  if (!isTouched) { wasTouched = false; return; }
+
+  TS_Point p = ts.getPoint();
+  // Both axes run opposite to the display: a press at bottom-left was landing
+  // top-right, so the output ranges are reversed.
+  int sx = constrain((int)map(p.x, TOUCH_RAW_MINX, TOUCH_RAW_MAXX, 319, 0), 0, 319);
+  int sy = constrain((int)map(p.y, TOUCH_RAW_MINY, TOUCH_RAW_MAXY, 239, 0), 0, 239);
+  bool hit = sx >= FLOOD_X - TOUCH_HIT_MARGIN &&
+             sx <  FLOOD_X + FLOOD_W + TOUCH_HIT_MARGIN &&
+             sy >= FLOOD_Y - TOUCH_HIT_MARGIN &&
+             sy <  FLOOD_Y + FLOOD_H + TOUCH_HIT_MARGIN;
+
+  if (millis() - lastLog > 200) {
+    Serial.printf("touch raw(%4d,%4d) z=%4d -> screen(%3d,%3d) %s%s\n",
+                  p.x, p.y, p.z, sx, sy, hit ? "HIT" : "miss",
+                  wasTouched ? " (held)" : " PRESS");
+    lastLog = millis();
   }
+
+  if (!wasTouched && hit && millis() - lastToggle > TOUCH_DEBOUNCE_MS) {
+    floodMode = (FloodMode)((floodMode + 1) % 3);  // OFF -> ON -> ARM -> OFF
+    floodPrefs.putUChar("mode", (uint8_t)floodMode);
+    Serial.printf("FLOOD mode=%s\n", floodMode == FLOOD_OFF ? "OFF"
+                                    : floodMode == FLOOD_ON  ? "ON" : "ARM");
+    lastToggle = millis();
+  }
+  wasTouched = true;
+}
+
+// Decide whether the bar should actually be lit, and drive the pin.
+void updateFlood() {
+  bool beams = highBeamOn && (millis() - lastLightingMsg < HIGH_BEAM_STALE_MS);
+  bool want;
+  switch (floodMode) {
+    case FLOOD_ON:    want = true; break;
+    case FLOOD_ARMED: want = beams && (millis() - highBeamSince >= HIGH_BEAM_ARM_MS); break;
+    default:          want = false; break;
+  }
+  if (want != floodLit) {
+    floodLit = want;
+    digitalWrite(FLOOD_PIN, floodLit ? HIGH : LOW);
+    Serial.printf("FLOOD %s\n", floodLit ? "LIT" : "dark");
+  }
+}
+
+// Draw the flood button. Text is the mode, fill is whether the bar is lit now.
+void drawFloodCard(int x, int y, int w, int h, FloodMode mode, bool lit) {
+  // Yellow fill only when the bar is actually lit. Unlit, ARM is green so it
+  // reads as "ready and waiting" and is distinct from a plain OFF.
+  uint16_t bg = lit ? COLOR_WARNING : COLOR_CARD_BG;
+  uint16_t fg = lit             ? COLOR_BACKGROUND
+              : mode == FLOOD_ARMED ? COLOR_SUCCESS
+                                    : COLOR_TEXT;
+
+  tft.fillRoundRect(x, y, w, h, CARD_RADIUS, bg);
+  tft.drawRoundRect(x, y, w, h, CARD_RADIUS, lit ? COLOR_TEXT : COLOR_PRIMARY);
+
+  int16_t x1, y1; uint16_t tw, th;
+  tft.setFont(LABEL_FONT);
+  tft.setTextColor(lit ? COLOR_BACKGROUND : COLOR_PRIMARY);
+  tft.getTextBounds("FLOOD", 0, 0, &x1, &y1, &tw, &th);
+  tft.setCursor(x + (w - tw) / 2, y + LABEL_OFFSET_Y);
+  tft.print("FLOOD");
+
+  const char* state = mode == FLOOD_OFF ? "OFF" : mode == FLOOD_ON ? "ON" : "ARM";
+  tft.setFont(FLOOD_STATE_FONT);
+  tft.setTextColor(fg);
+  tft.getTextBounds(state, 0, 0, &x1, &y1, &tw, &th);
+  tft.setCursor(x + (w - tw) / 2, y + OAT_VALUE_OFFSET_Y);
+  tft.print(state);
 }
