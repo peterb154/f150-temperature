@@ -120,7 +120,8 @@ int consoleDimLevel = MAX_DIM_LEVEL; // Console brightness (1-18)
 bool dataReceived = false;
 
 // Previous values for dirty flag checking
-long shownOAT = OAT_DISPLAY_UNSET;  // whole degrees currently on screen
+long shownOAT = OAT_DISPLAY_UNSET;      // degrees we want on screen
+long drawnOAT = OAT_DISPLAY_UNSET - 1;  // what is on screen; mismatch forces first draw
 int prevDriverTempSet = -1;
 int prevPassengerTempSet = -1;
 int prevFanSpeed = -1;
@@ -147,7 +148,7 @@ void simulateData();
 void processCanMessages();
 void drawTempCard(int x, int y, int w, int h, const char* label, int temp);
 void drawFanCard(int x, int y, int w, int h, int fanLevel);
-void drawOATCard(int x, int y, int w, int h, float temp);
+void drawOATCard(int x, int y, int w, int h, long temp);
 float decodeOAT(uint8_t byte6, uint8_t byte7);
 float decodeSpeedMph(uint8_t byte0, uint8_t byte1);
 void updateOAT(float rawOAT);
@@ -453,10 +454,14 @@ void simulateData() {
 // Update Display with Smart Redrawing (only when data changes)
 void updateDisplay() {
   // Only redraw cards that have changed data
-  long wantOAT = displayedOAT(outsideTemp, shownOAT, OAT_HYSTERESIS_F);
-  if (wantOAT != shownOAT) {
-    shownOAT = wantOAT;
-    drawOATCard(OAT_X, OAT_Y, OAT_WIDTH, OAT_HEIGHT, (float)shownOAT);
+  // Until a real reading lands, show the card with no number rather than the
+  // 72.0 that outsideTemp is initialised to - inventing a temperature that
+  // looks exactly like a measured one is worse than showing nothing.
+  shownOAT = oatSeeded ? displayedOAT(outsideTemp, shownOAT, OAT_HYSTERESIS_F)
+                       : OAT_DISPLAY_UNSET;
+  if (shownOAT != drawnOAT) {
+    drawnOAT = shownOAT;
+    drawOATCard(OAT_X, OAT_Y, OAT_WIDTH, OAT_HEIGHT, shownOAT);
   }
   
   if (driverTempSet != prevDriverTempSet) {
@@ -505,7 +510,7 @@ void updateDisplay() {
 }
 
 // Draw Outside Air Temperature Card
-void drawOATCard(int x, int y, int w, int h, float temp) {
+void drawOATCard(int x, int y, int w, int h, long temp) {
   // Card background
   tft.fillRoundRect(x, y, w, h, CARD_RADIUS, COLOR_CARD_BG);
   tft.drawRoundRect(x, y, w, h, CARD_RADIUS, COLOR_PRIMARY);
@@ -520,15 +525,19 @@ void drawOATCard(int x, int y, int w, int h, float temp) {
   tft.setCursor(centeredX, y + LABEL_OFFSET_Y);
   tft.print("OAT");
   
-  // Center the temperature value (larger font, no 'F' suffix)
-  tft.setFont(VALUE_FONT);
-  tft.setTextColor(COLOR_TEXT);
-  char tempStr[6];
-  sprintf(tempStr, "%.0f", temp);
-  tft.getTextBounds(tempStr, 0, 0, &x1, &y1, &textW, &textH);
-  centeredX = x + (w - textW) / 2;
-  tft.setCursor(centeredX, y + OAT_VALUE_OFFSET_Y);
-  tft.print(tempStr);
+  // Center the temperature value (larger font, no 'F' suffix).
+  // OAT_DISPLAY_UNSET means no reading yet, so leave the value area empty -
+  // same convention drawTempCard() uses for a disabled HVAC zone.
+  if (temp != OAT_DISPLAY_UNSET) {
+    tft.setFont(VALUE_FONT);
+    tft.setTextColor(COLOR_TEXT);
+    char tempStr[8];
+    snprintf(tempStr, sizeof(tempStr), "%ld", temp);
+    tft.getTextBounds(tempStr, 0, 0, &x1, &y1, &textW, &textH);
+    centeredX = x + (w - textW) / 2;
+    tft.setCursor(centeredX, y + OAT_VALUE_OFFSET_Y);
+    tft.print(tempStr);
+  }
 }
 
 // Draw Temperature Setting Card (Driver/Passenger)
