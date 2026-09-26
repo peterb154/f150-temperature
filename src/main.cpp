@@ -10,6 +10,7 @@
 #include <flood_logic.h>
 #include <oat_logic.h>
 #include <touch_logic.h>
+#include <fuel_logic.h>
 #include <stdint.h>
 #include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
@@ -34,6 +35,12 @@
 #define DRIVER_X 10
 #define FAN_X (DRIVER_X + CARD_WIDTH + CARD_SPACING)
 #define PASS_X (FAN_X + CARD_WIDTH + CARD_SPACING)
+
+// Fuel percentage - top-centre grid slot (OAT's row, FAN's column)
+#define FUEL_X FAN_X
+#define FUEL_Y OAT_Y
+#define FUEL_W OAT_WIDTH
+#define FUEL_H OAT_HEIGHT
 
 // Flood light button - top-right grid slot (OAT's row, PASS's column)
 #define FLOOD_X PASS_X
@@ -76,6 +83,7 @@
 #define PID_CONSOLE_LIGHTS 0x3B3 // Console Light Dimming
 #define PID_VEHICLE_SPEED 0x423  // Vehicle Speed
 #define PID_LIGHTING      0x3C3  // Headlamp / high beam (see F150_HIGH_BEAM.md)
+#define PID_FUEL          0x465  // Fuel level, UNCONFIRMED (see fuel_logic.h, #11)
 
 // OAT damping: engine heat skews the sensor high when slow or stopped
 #define OAT_MOVING_MPH    20     // Above this speed...
@@ -127,6 +135,9 @@ bool dataReceived = false;
 // Previous values for dirty flag checking
 long shownOAT = OAT_DISPLAY_UNSET;      // degrees we want on screen
 long drawnOAT = OAT_DISPLAY_UNSET - 1;  // what is on screen; mismatch forces first draw
+int fuelRaw = -1;              // 0x465 byte6, -1 until a frame arrives
+int shownFuel = FUEL_UNKNOWN;  // percentage we want on screen
+int drawnFuel = -2;            // what is on screen; mismatch forces first draw
 int prevDriverTempSet = -1;
 int prevPassengerTempSet = -1;
 int prevFanSpeed = -1;
@@ -164,6 +175,7 @@ void setBacklightBrightness(int level);
 void initTouch();
 void handleTouch();
 void drawFloodCard(int x, int y, int w, int h, FloodMode mode, bool lit);
+void drawFuelCard(int x, int y, int w, int h, int percent);
 void updateFlood();
 
 // Arduino Setup Function
@@ -333,6 +345,12 @@ void processCanMessages() {
         }
         break;
         
+      case PID_FUEL: // Fuel level - UNCONFIRMED decode, see #11
+        if (message.data_length_code >= 7) {
+          fuelRaw = message.data[6];
+        }
+        break;
+
       case PID_LIGHTING: // Headlamp / high beam state
         if (message.data_length_code >= 1) {
           bool hb = (message.data[0] & HIGH_BEAM_MASK) != 0;
@@ -507,6 +525,12 @@ void updateDisplay() {
     simModeShown = false;
   }
   
+  shownFuel = fuelPercent(fuelRaw, FUEL_RAW_FULL);
+  if (shownFuel != drawnFuel) {
+    drawnFuel = shownFuel;
+    drawFuelCard(FUEL_X, FUEL_Y, FUEL_W, FUEL_H, shownFuel);
+  }
+
   if (floodMode != prevFloodMode || floodLit != prevFloodLit) {
     drawFloodCard(FLOOD_X, FLOOD_Y, FLOOD_W, FLOOD_H, floodMode, floodLit);
     prevFloodMode = floodMode;
@@ -771,4 +795,28 @@ void drawFloodCard(int x, int y, int w, int h, FloodMode mode, bool lit) {
   tft.getTextBounds(state, 0, 0, &x1, &y1, &tw, &th);
   tft.setCursor(x + (w - tw) / 2, y + OAT_VALUE_OFFSET_Y);
   tft.print(state);
+}
+
+// Draw the fuel card. Blank until a frame arrives, matching the OAT card.
+void drawFuelCard(int x, int y, int w, int h, int percent) {
+  tft.fillRoundRect(x, y, w, h, CARD_RADIUS, COLOR_CARD_BG);
+  tft.drawRoundRect(x, y, w, h, CARD_RADIUS, COLOR_PRIMARY);
+
+  int16_t x1, y1; uint16_t tw, th;
+  tft.setFont(LABEL_FONT);
+  tft.setTextColor(COLOR_PRIMARY);
+  tft.getTextBounds("FUEL", 0, 0, &x1, &y1, &tw, &th);
+  tft.setCursor(x + (w - tw) / 2, y + LABEL_OFFSET_Y);
+  tft.print("FUEL");
+
+  if (percent == FUEL_UNKNOWN) return;
+
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%d", percent);
+  // "100" is three wide glyphs; drop a size so it fits a 90px card
+  tft.setFont(percent >= 100 ? FLOOD_STATE_FONT : VALUE_FONT);
+  tft.setTextColor(percent <= 15 ? COLOR_WARNING : COLOR_TEXT);
+  tft.getTextBounds(buf, 0, 0, &x1, &y1, &tw, &th);
+  tft.setCursor(x + (w - tw) / 2, y + OAT_VALUE_OFFSET_Y);
+  tft.print(buf);
 }
