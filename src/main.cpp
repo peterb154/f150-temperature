@@ -9,6 +9,7 @@
 #include <Preferences.h>
 #include <flood_logic.h>
 #include <oat_logic.h>
+#include <touch_logic.h>
 #include <stdint.h>
 #include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
@@ -40,11 +41,9 @@
 #define FLOOD_W OAT_WIDTH
 #define FLOOD_H OAT_HEIGHT
 
-// Touch calibration: raw XPT2046 ADC range. Tune from the serial output.
-#define TOUCH_RAW_MINX 780
-#define TOUCH_RAW_MAXX 3100
-#define TOUCH_RAW_MINY 858
-#define TOUCH_RAW_MAXY 3402
+// Touch calibration lives in include/touch_logic.h so the firmware and the
+// host tests share one set of numbers. See docs/TOUCH_CALIBRATION.md to
+// re-measure it.
 #define TOUCH_HIT_MARGIN 8   // forgiveness around the button edge
 #define TOUCH_DEBOUNCE_MS 250
 
@@ -98,7 +97,10 @@ Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_MOSI, TFT_CLK, TFT_R
 // one sample reads below its pressure threshold, and only a new falling edge
 // rearms it - so a soft press is sampled once while the finger is still
 // settling, discarded, and never looked at again. With no IRQ pin isrWake stays
-// true and update() samples on every call. See #9.
+// true and update() samples on every call.
+//
+// Note this was NOT the cause of the missed presses in #9 - that was a bad
+// calibration range. The latch is a real defect regardless.
 XPT2046_Touchscreen ts(TOUCH_CS);
 
 // Flood light state. Mode is what the button selects; lit is what the pin does.
@@ -710,14 +712,11 @@ void handleTouch() {
   if (!isTouched) { wasTouched = false; return; }
 
   TS_Point p = ts.getPoint();
-  // Both axes run opposite to the display: a press at bottom-left was landing
-  // top-right, so the output ranges are reversed.
-  int sx = constrain((int)map(p.x, TOUCH_RAW_MINX, TOUCH_RAW_MAXX, 319, 0), 0, 319);
-  int sy = constrain((int)map(p.y, TOUCH_RAW_MINY, TOUCH_RAW_MAXY, 239, 0), 0, 239);
-  bool hit = sx >= FLOOD_X - TOUCH_HIT_MARGIN &&
-             sx <  FLOOD_X + FLOOD_W + TOUCH_HIT_MARGIN &&
-             sy >= FLOOD_Y - TOUCH_HIT_MARGIN &&
-             sy <  FLOOD_Y + FLOOD_H + TOUCH_HIT_MARGIN;
+  TouchCal cal = touchCal();
+  int sx = touchScreenX(p.x, cal);
+  int sy = touchScreenY(p.y, cal);
+  bool hit = touchInRect(sx, sy, FLOOD_X, FLOOD_Y, FLOOD_W, FLOOD_H,
+                         TOUCH_HIT_MARGIN);
 
   if (!wasTouched && hit && millis() - lastToggle > TOUCH_DEBOUNCE_MS) {
     floodMode = (FloodMode)((floodMode + 1) % FLOOD_MODE_COUNT);  // OFF -> ON -> ARM
