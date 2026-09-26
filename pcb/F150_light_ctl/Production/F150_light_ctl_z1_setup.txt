@@ -1,0 +1,39 @@
+================================================================
+Makera Z1 setup sheet -- F150_light_ctl
+================================================================
+
+G-code    F150_light_ctl_z1.ngc
+Board     F150_light_ctl.kicad_pcb  (1.60mm thick)
+Side      TOP-DOWN -- component side up.
+Origin    KiCad drill/place (aux) origin
+Extent    X -7.31 to 9.39, Y -11.85 to 3.35 mm
+Depth     1.80mm  (1.60 board + 0.20 breakthrough)
+Spindle   13000 rpm
+
+TOOLS, in program order
+----------------------------------------------------------------
+  T1     0.80 mm  CORN/FISHTAIL END MILL     5 hole(s), every size with this one bit, milled helically
+  T2     1.20 mm  CORN/FISHTAIL END MILL     outline 62.8mm, 1 path(s), 4 tab(s) of 1.00mm at Z-1.00
+
+You will be asked to install:
+----------------------------------------------------------------
+  T1   0.80mm CORN/FISHTAIL END MILL (NOT a twist drill)
+  T2   1.20mm CORN/FISHTAIL END MILL (NOT a twist drill)
+
+BEFORE YOU START
+----------------------------------------------------------------
+  * USE A SACRIFICIAL LAYER. Cuts go ~0.2mm past the far face.
+  * Install T1, then Tool dropdown -> Change tool -> T1
+    (registers the tool and sets its TLO).
+  * Set XY origin to the drill/place origin. Do not move it again.
+  * Run the first tool with Auto Z Probe ON. Z0 is tool-independent,
+    so later tools need no re-probe -- the M6 re-zeros them on the
+    back-right setter.
+
+DURING THE RUN
+----------------------------------------------------------------
+  * Each M6 stops and prompts for the swap, then re-zeros on the
+    setter. Do not skip the re-zero.
+  * The outline is cut LAST: it is what frees the part. It stays
+    held by 4 tab(s) of 1.00mm until you snap them.
+
