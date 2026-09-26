@@ -7,6 +7,7 @@
 #include <driver/twai.h>
 #include <XPT2046_Touchscreen.h>
 #include <Preferences.h>
+#include <flood_logic.h>
 #include <stdint.h>
 #include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
@@ -44,6 +45,7 @@
 #define TOUCH_RAW_MINY 800
 #define TOUCH_RAW_MAXY 2830
 #define TOUCH_HIT_MARGIN 8   // forgiveness around the button edge
+#define TOUCH_DEBOUNCE_MS 250
 
 // "OFF" is three wide glyphs; the 24pt value font overflows a 90px card
 #define FLOOD_STATE_FONT &FreeSansBold18pt7b
@@ -54,7 +56,6 @@
 #define HIGH_BEAM_MASK      0x02
 #define HIGH_BEAM_ARM_MS    2500
 #define HIGH_BEAM_STALE_MS  3000   // no 0x3C3 for this long -> assume beams off
-#define TOUCH_DEBOUNCE_MS 250
 
 // Font sizes
 #define LABEL_FONT &FreeSans9pt7b
@@ -94,7 +95,6 @@ Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_MOSI, TFT_CLK, TFT_R
 XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
 
 // Flood light state. Mode is what the button selects; lit is what the pin does.
-enum FloodMode { FLOOD_OFF, FLOOD_ON, FLOOD_ARMED };
 FloodMode floodMode = FLOOD_OFF;
 FloodMode prevFloodMode = FLOOD_ARMED;  // mismatch forces the first draw
 bool floodLit = false;
@@ -695,7 +695,6 @@ void initTouch() {
 void handleTouch() {
   static bool wasTouched = false;
   static unsigned long lastToggle = 0;
-  static unsigned long lastLog = 0;
 
   bool isTouched = ts.touched();
   if (!isTouched) { wasTouched = false; return; }
@@ -710,15 +709,8 @@ void handleTouch() {
              sy >= FLOOD_Y - TOUCH_HIT_MARGIN &&
              sy <  FLOOD_Y + FLOOD_H + TOUCH_HIT_MARGIN;
 
-  if (millis() - lastLog > 200) {
-    Serial.printf("touch raw(%4d,%4d) z=%4d -> screen(%3d,%3d) %s%s\n",
-                  p.x, p.y, p.z, sx, sy, hit ? "HIT" : "miss",
-                  wasTouched ? " (held)" : " PRESS");
-    lastLog = millis();
-  }
-
   if (!wasTouched && hit && millis() - lastToggle > TOUCH_DEBOUNCE_MS) {
-    floodMode = (FloodMode)((floodMode + 1) % 3);  // OFF -> ON -> ARM -> OFF
+    floodMode = (FloodMode)((floodMode + 1) % FLOOD_MODE_COUNT);  // OFF -> ON -> ARM
     floodPrefs.putUChar("mode", (uint8_t)floodMode);
     Serial.printf("FLOOD mode=%s\n", floodMode == FLOOD_OFF ? "OFF"
                                     : floodMode == FLOOD_ON  ? "ON" : "ARM");
@@ -729,13 +721,15 @@ void handleTouch() {
 
 // Decide whether the bar should actually be lit, and drive the pin.
 void updateFlood() {
-  bool beams = highBeamOn && (millis() - lastLightingMsg < HIGH_BEAM_STALE_MS);
-  bool want;
-  switch (floodMode) {
-    case FLOOD_ON:    want = true; break;
-    case FLOOD_ARMED: want = beams && (millis() - highBeamSince >= HIGH_BEAM_ARM_MS); break;
-    default:          want = false; break;
-  }
+  unsigned long now = millis();
+
+  // A quiet bus invalidates the cached beam state. Without this the next frame
+  // to arrive would find highBeamOn already true, leave highBeamSince stale and
+  // relight the bar instantly - skipping the arming delay entirely.
+  if (now - lastLightingMsg >= HIGH_BEAM_STALE_MS) highBeamOn = false;
+
+  bool want = shouldLight(floodMode, highBeamOn, now, highBeamSince,
+                          lastLightingMsg, HIGH_BEAM_ARM_MS, HIGH_BEAM_STALE_MS);
   if (want != floodLit) {
     floodLit = want;
     digitalWrite(FLOOD_PIN, floodLit ? HIGH : LOW);
