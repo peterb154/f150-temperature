@@ -23,6 +23,10 @@
 // Status LED
 #define STATUS_LED_PIN 15
 
+// Flood light control - drives 2N2222A base via 220R, switches relay coil
+// Board: pcb/F150_light_ctl. Not 19/20 (native USB), not 0/3/45/46 (strapping).
+#define FLOOD_PIN 13
+
 // Colors
 #define COLOR_BACKGROUND 0x0841
 #define COLOR_CARD_BG    0x2124
