@@ -43,8 +43,8 @@
 // Touch calibration: raw XPT2046 ADC range. Tune from the serial output.
 #define TOUCH_RAW_MINX 780
 #define TOUCH_RAW_MAXX 3100
-#define TOUCH_RAW_MINY 800
-#define TOUCH_RAW_MAXY 2830
+#define TOUCH_RAW_MINY 858
+#define TOUCH_RAW_MAXY 3402
 #define TOUCH_HIT_MARGIN 8   // forgiveness around the button edge
 #define TOUCH_DEBOUNCE_MS 250
 
@@ -94,9 +94,12 @@
 
 // Create TFT instance
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_MOSI, TFT_CLK, TFT_RST, TFT_MISO);
-// IRQ mode is required: with the IRQ pin omitted the library never reports a
-// touch on this hardware. Verified by testing both ways in the truck.
-XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
+// Polled, not IRQ-driven. In IRQ mode the library sets isrWake=false as soon as
+// one sample reads below its pressure threshold, and only a new falling edge
+// rearms it - so a soft press is sampled once while the finger is still
+// settling, discarded, and never looked at again. With no IRQ pin isrWake stays
+// true and update() samples on every call. See #9.
+XPT2046_Touchscreen ts(TOUCH_CS);
 
 // Flood light state. Mode is what the button selects; lit is what the pin does.
 FloodMode floodMode = FLOOD_OFF;
